@@ -24,6 +24,30 @@ FixStyle(rigid/small,FixRigidSmall);
 
 namespace LAMMPS_NS {
 
+struct Body {
+  int natoms;            // total number of atoms in body
+  int ilocal;            // index of owning atom
+  double mass;           // total mass of body
+  double xcm[3];         // COM position
+  double xgc[3];         // geometric center position
+  double vcm[3];         // COM velocity
+  double fcm[3];         // force on COM
+  double torque[3];      // torque around COM
+  double quat[4];        // quaternion for orientation of body
+  double inertia[3];     // 3 principal components of inertia
+  double ex_space[3];    // principal axes in space coords
+  double ey_space[3];
+  double ez_space[3];
+  double xgc_body[3];    // geometric center relative to xcm in body coords
+  double angmom[3];      // space-frame angular momentum of body
+  double omega[3];       // space-frame omega of body
+  double conjqm[4];      // conjugate quaternion momentum
+  int remapflag[4];      // PBC remap flags
+  imageint image;        // image flags of xcm
+  imageint dummy;        // dummy entry for better alignment
+};
+
+
 class FixRigidSmall : public Fix {
   friend class ComputeRigidLocal;
 
@@ -31,17 +55,17 @@ class FixRigidSmall : public Fix {
   FixRigidSmall(class LAMMPS *, int, char **);
   ~FixRigidSmall() override;
   int setmask() override;
-  void init() override;
-  void setup(int) override;
-  void initial_integrate(int) override;
-  void post_force(int) override;
-  void final_integrate() override;
-  void initial_integrate_respa(int, int, int) override;
-  void final_integrate_respa(int, int) override;
-  void write_restart_file(const char *) override;
+  virtual void init() override;
+  virtual void setup(int) override;
+  virtual void initial_integrate(int) override;
+  virtual void post_force(int) override;
+  virtual void final_integrate() override;
+  virtual void initial_integrate_respa(int, int, int) override;
+  virtual void final_integrate_respa(int, int) override;
+  virtual void write_restart_file(const char *) override;
 
-  void grow_arrays(int) override;
-  void copy_arrays(int, int, int) override;
+  virtual void grow_arrays(int) override;
+  virtual void copy_arrays(int, int, int) override;
   void set_arrays(int) override;
   void set_molecule(int, tagint, int, double *, double *, double *) override;
 
@@ -52,8 +76,8 @@ class FixRigidSmall : public Fix {
   int pack_reverse_comm(int, int, double *) override;
   void unpack_reverse_comm(int, int *, double *) override;
 
-  void setup_pre_neighbor() override;
-  void pre_neighbor() override;
+  virtual void setup_pre_neighbor() override;
+  virtual void pre_neighbor() override;
   int dof(int) override;
   void deform(int) override;
   void enforce2d() override;
@@ -82,29 +106,6 @@ class FixRigidSmall : public Fix {
   int nlinear;         // total # of linear rigid bodies
   tagint maxmol;       // max mol-ID
   double maxextent;    // furthest distance from body owner to body atom
-
-  struct Body {
-    int natoms;            // total number of atoms in body
-    int ilocal;            // index of owning atom
-    double mass;           // total mass of body
-    double xcm[3];         // COM position
-    double xgc[3];         // geometric center position
-    double vcm[3];         // COM velocity
-    double fcm[3];         // force on COM
-    double torque[3];      // torque around COM
-    double quat[4];        // quaternion for orientation of body
-    double inertia[3];     // 3 principal components of inertia
-    double ex_space[3];    // principal axes in space coords
-    double ey_space[3];
-    double ez_space[3];
-    double xgc_body[3];    // geometric center relative to xcm in body coords
-    double angmom[3];      // space-frame angular momentum of body
-    double omega[3];       // space-frame omega of body
-    double conjqm[4];      // conjugate quaternion momentum
-    int remapflag[4];      // PBC remap flags
-    imageint image;        // image flags of xcm
-    imageint dummy;        // dummy entry for better alignment
-  };
 
   Body *body;         // list of rigid bodies, owned and ghost
   int nlocal_body;    // # of owned rigid bodies
@@ -195,7 +196,7 @@ class FixRigidSmall : public Fix {
 
   // local methods
 
-  void image_shift();
+  virtual void image_shift();
   void set_xv();
   void set_v();
   void create_bodies(tagint *);
@@ -204,8 +205,8 @@ class FixRigidSmall : public Fix {
   void apply_langevin_thermostat();
   void compute_forces_and_torques();
   void readfile(int, double **, int *);
-  void grow_body();
-  void reset_atom2body();
+  virtual void grow_body();
+  virtual void reset_atom2body();
 
   // callback function for rendezvous communication
 

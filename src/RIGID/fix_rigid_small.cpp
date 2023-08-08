@@ -479,6 +479,8 @@ FixRigidSmall::FixRigidSmall(LAMMPS *lmp, int narg, char **arg) :
 
 FixRigidSmall::~FixRigidSmall()
 {
+  if(copymode) return;
+
   // unregister callbacks to this fix from Atom class
 
   atom->delete_callback(id,Atom::GROW);
@@ -883,6 +885,7 @@ void FixRigidSmall::enforce2d()
 }
 
 /* ---------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------- */
 
 void FixRigidSmall::post_force(int /*vflag*/)
 {
@@ -1088,6 +1091,24 @@ void FixRigidSmall::pre_neighbor()
   //check(4);
 
   image_shift();
+
+  /*
+  printf("rank %d bodytag:", comm->me);
+  for(int i = 0; i < atom->nlocal; i++){
+    if (bodytag[i] <= 0) continue;
+
+    printf(" %d:%d", i, bodytag[i]);
+  }
+  printf("\n");
+  printf("rank %d atom2body:", comm->me);
+  for(int i = 0; i < atom->nlocal; i++){
+    if (atom2body[i] < 0) continue;
+
+    printf(" %d:%d", i, atom2body[i]);
+  }
+  printf("\n");
+  fflush(stdout);
+  */
 }
 
 /* ----------------------------------------------------------------------
@@ -3280,6 +3301,11 @@ void FixRigidSmall::unpack_reverse_comm(int n, int *list, double *buf)
       torque[0] += buf[m++];
       torque[1] += buf[m++];
       torque[2] += buf[m++];
+
+      /*
+      printf("rank %d atom %d body %d fcm %.2f %.2f %.2f\n",
+          comm->me, j, bodyown[j], fcm[0], fcm[1], fcm[2]);
+      */
     }
 
   } else if (commflag == VCM_ANGMOM) {

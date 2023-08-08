@@ -641,6 +641,10 @@ void CommKokkos::reverse_comm(Dump *dump)
 
 void CommKokkos::exchange()
 {
+  // TODO: For now, want check to be done every time in order to do host
+  // communication during setup and device communication later
+  int exchange_comm_classic = this->exchange_comm_classic;
+
   if (!exchange_comm_classic) {
     if (atom->nextra_grow) {
 

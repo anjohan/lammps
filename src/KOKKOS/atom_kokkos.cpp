@@ -164,12 +164,16 @@ void AtomKokkos::sort()
 {
   // check if all fixes with atom-based arrays support sort on device
 
+  // avoid permanent change to sort_classic based on current flags
+  int sort_classic = this->sort_classic;
+
   if (!sort_classic) {
     int flag = 1;
     for (int iextra = 0; iextra < atom->nextra_grow; iextra++) {
       auto fix_iextra = modify->fix[atom->extra_grow[iextra]];
       if (!fix_iextra->sort_device) {
         flag = 0;
+        error->warning(FLERR, "fix w/o device sort");
         break;
       }
     }
