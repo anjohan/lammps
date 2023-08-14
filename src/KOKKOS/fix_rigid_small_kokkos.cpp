@@ -28,6 +28,9 @@
 #include "random_mars.h"
 #include "domain.h"
 #include "error.h"
+#include "math_extra_kokkos.h"
+#include "kokkos_few.h"
+#include "domain_kokkos.h"
 
 #include <cmath>
 #include <cstring>
@@ -189,13 +192,45 @@ void FixRigidSmallKokkos<DeviceType>::pre_neighbor(){
     return;
   }
 
+  int triclinic = domain->triclinic;
+  int xperiodic = domain->xperiodic;
+  int yperiodic = domain->yperiodic;
+  int zperiodic = domain->zperiodic;
+  Few<double,6> h(domain->h);
+  Few<double,6> h_inv(domain->h_inv);
+  Few<double,3> boxlo(domain->boxlo);
+  Few<double,3> lo, hi, period;
+
+  if (triclinic == 0) {
+    lo = Few<double,3>(domain->boxlo);
+    hi = Few<double,3>(domain->boxhi);
+    period = Few<double,3>(domain->prd);
+  } else {
+    lo = Few<double,3>(domain->boxlo_lamda);
+    hi = Few<double,3>(domain->boxhi_lamda);
+    period = Few<double,3>(domain->prd_lamda);
+  }
+
   // TODO: domainKK
   Kokkos::parallel_for(
     "fix rigid/small remap",
     Range1D(0, nlocal_body),
     KOKKOS_LAMBDA(const int ibody) {
       Body &b = d_body(ibody);
-      domain->remap(b.xcm,b.image);
+      Few<double,3> x(b.xcm);
+      Few<double,3> coord;
+      if (triclinic == 0) {
+        coord = Few<double,3>(x);
+      } else {
+        coord = DomainKokkos::x2lamda(boxlo, h_inv, x);
+      }
+      DomainKokkos::remap(lo, hi, period, xperiodic, yperiodic, zperiodic, coord, b.image);
+      if (triclinic) {
+        x = DomainKokkos::lamda2x(boxlo, h, coord);
+        for(int i = 0; i < 3; i++) {
+          b.xcm[i] = x[i];
+        }
+      }
     }
   );
 #ifdef LMP_KOKKOS_GPU
@@ -313,14 +348,10 @@ void FixRigidSmallKokkos<DeviceType>::operator()(TagInitialIntegrate, const int 
   // returns new normalized quaternion, also updated omega at 1/2 step
   // update ex,ey,ez to reflect new quaternion
 
-  // TODO for GPU: Convert to MathExtraKokkos
-#ifdef LMP_KOKKOS_GPU
-  static_assert(false, "compute_scalar needs mathextrakokkos");
-#endif
-  MathExtra::angmom_to_omega(b.angmom,b.ex_space,b.ey_space,
+  MathExtraKokkos::angmom_to_omega(b.angmom,b.ex_space,b.ey_space,
                               b.ez_space,b.inertia,b.omega);
-  MathExtra::richardson(b.quat,b.angmom,b.omega,b.inertia,dtq);
-  MathExtra::q_to_exyz(b.quat,b.ex_space,b.ey_space,b.ez_space);
+  MathExtraKokkos::richardson(b.quat,b.angmom,b.omega,b.inertia,dtq);
+  MathExtraKokkos::q_to_exyz(b.quat,b.ex_space,b.ey_space,b.ez_space);
 }
 
 /* ----------------------------------------------------------------------
@@ -429,20 +460,26 @@ void FixRigidSmallKokkos<DeviceType>::compute_forces_and_torques_kokkos()
   auto d_xcmimage = this->d_xcmimage;
   auto d_atom2body = this->d_atom2body;
 
+  auto prd = Few<double,3>(domain->prd);
+  auto h = Few<double,6>(domain->h);
+  auto triclinic = domain->triclinic;
+
   Kokkos::parallel_for(
     "fix rigid/small add tcm&fcm",
     Range1D(0,nlocal),
     KOKKOS_LAMBDA (const int i) {
       if (d_atom2body(i) < 0) return;
       Body &b = d_body(d_atom2body(i));
-      double unwrap[3];
 
       Kokkos::atomic_add(&b.fcm[0], d_f(i,0));
       Kokkos::atomic_add(&b.fcm[1], d_f(i,1));
       Kokkos::atomic_add(&b.fcm[2], d_f(i,2));
 
-      // TODO: Need device function
-      domain->unmap(&d_x(i,0),d_xcmimage(i),&unwrap[0]);
+      Few<double,3> x_i;
+      x_i[0] = d_x(i,0);
+      x_i[1] = d_x(i,1);
+      x_i[2] = d_x(i,2);
+      auto unwrap = DomainKokkos::unmap(prd,h,triclinic,x_i,d_xcmimage(i));
       double dx = unwrap[0] - b.xcm[0];
       double dy = unwrap[1] - b.xcm[1];
       double dz = unwrap[2] - b.xcm[2];
@@ -544,11 +581,7 @@ void FixRigidSmallKokkos<DeviceType>::final_integrate()
       b.angmom[1] += dtf * b.torque[1];
       b.angmom[2] += dtf * b.torque[2];
 
-      // TODO: Kokkos
-#ifdef LMP_KOKKOS_GPU
-  static_assert(false, "needs mathextrakokkos");
-#endif
-      MathExtra::angmom_to_omega(&b.angmom[0],&b.ex_space[0],&b.ey_space[0],
+      MathExtraKokkos::angmom_to_omega(&b.angmom[0],&b.ex_space[0],&b.ey_space[0],
                                 &b.ez_space[0],&b.inertia[0],&b.omega[0]);
     }
   );
@@ -699,10 +732,7 @@ void FixRigidSmallKokkos<DeviceType>::operator()(TagSetXV<SETXFLAG>, const int i
   // v = vcm + omega around center-of-mass
 
   double delta[3];
-#ifdef LMP_KOKKOS_GPU
-  static_assert(false, "needs mathextrakokkos");
-#endif
-  MathExtra::matvec(b.ex_space,b.ey_space,b.ez_space,&d_displace(i,0),delta);
+  MathExtraKokkos::matvec(b.ex_space,b.ey_space,b.ez_space,&d_displace(i,0),delta);
 
   d_v(i,0) = b.omega[1]*delta[2] - b.omega[2]*delta[1] + b.vcm[0];
   d_v(i,1) = b.omega[2]*delta[0] - b.omega[0]*delta[2] + b.vcm[1];
@@ -756,10 +786,7 @@ template<class DeviceType>
 KOKKOS_INLINE_FUNCTION
 void FixRigidSmallKokkos<DeviceType>::operator()(TagUpdateXGC, const int ibody) const {
   Body &b = d_body(ibody);
-#ifdef LMP_KOKKOS_GPU
-  static_assert(false, "needs mathextrakokkos");
-#endif
-  MathExtra::matvec(b.ex_space,b.ey_space,b.ez_space,
+  MathExtraKokkos::matvec(b.ex_space,b.ey_space,b.ez_space,
                     b.xgc_body,b.xgc);
   b.xgc[0] += b.xcm[0];
   b.xgc[1] += b.xcm[1];
@@ -1571,9 +1598,6 @@ double FixRigidSmallKokkos<DeviceType>::extract_ke()
 template<class DeviceType>
 double FixRigidSmallKokkos<DeviceType>::extract_erotational()
 {
-#ifdef LMP_KOKKOS_GPU
-  static_assert(false, "erotational needs mathextrakokkos");
-#endif
   double erotate = 0.0;
   Kokkos::parallel_reduce(
     "fix rigid/small erotational",
@@ -1586,8 +1610,8 @@ double FixRigidSmallKokkos<DeviceType>::extract_erotational()
       // not omega = angular velocity in space frame
 
       inertia = d_body(i).inertia;
-      MathExtra::quat_to_mat(body[i].quat,rot);
-      MathExtra::transpose_matvec(rot,d_body(i).angmom,wbody);
+      MathExtraKokkos::quat_to_mat(body[i].quat,rot);
+      MathExtraKokkos::transpose_matvec(rot,d_body(i).angmom,wbody);
       if (inertia[0] == 0.0) wbody[0] = 0.0;
       else wbody[0] /= inertia[0];
       if (inertia[1] == 0.0) wbody[1] = 0.0;
@@ -1615,9 +1639,6 @@ double FixRigidSmallKokkos<DeviceType>::extract_erotational()
 template<class DeviceType>
 double FixRigidSmallKokkos<DeviceType>::compute_scalar()
 {
-#ifdef LMP_KOKKOS_GPU
-  static_assert(false, "compute_scalar needs mathextrakokkos");
-#endif
 
   double t = 0.0;
   auto d_body = this->d_body;
@@ -1636,8 +1657,8 @@ double FixRigidSmallKokkos<DeviceType>::compute_scalar()
       // not omega = angular velocity in space frame
 
       inertia = body[i].inertia;
-      MathExtra::quat_to_mat(body[i].quat,rot);
-      MathExtra::transpose_matvec(rot,body[i].angmom,wbody);
+      MathExtraKokkos::quat_to_mat(body[i].quat,rot);
+      MathExtraKokkos::transpose_matvec(rot,body[i].angmom,wbody);
       if (inertia[0] == 0.0) wbody[0] = 0.0;
       else wbody[0] /= inertia[0];
       if (inertia[1] == 0.0) wbody[1] = 0.0;
