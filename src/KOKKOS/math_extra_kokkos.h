@@ -151,6 +151,7 @@ KOKKOS_INLINE_FUNCTION
 void angmom_to_omega(double *m, double *ex, double *ey, double *ez, double *idiag, double *w);
 KOKKOS_INLINE_FUNCTION
 void omega_to_angmom(double *w, double *ex, double *ey, double *ez, double *idiag, double *m);
+KOKKOS_INLINE_FUNCTION
 void mq_to_omega(double *m, double *q, double *moments, double *w);
 KOKKOS_INLINE_FUNCTION
 void exyz_to_q(double *ex, double *ey, double *ez, double *q);

@@ -104,11 +104,11 @@ class FixRigidSmallKokkos : public FixRigidSmall, public KokkosBase {
   KOKKOS_INLINE_FUNCTION
   void operator()(TagUpdateXGC, const int) const;
 
+  void compute_forces_and_torques_kokkos();
 
  protected:
 
   void set_xv_kokkos(int);
-  void compute_forces_and_torques_kokkos();
   void apply_langevin_thermostat_kokkos();
 
   // TODO: Use AT stuff

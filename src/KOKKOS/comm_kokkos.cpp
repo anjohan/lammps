@@ -434,6 +434,7 @@ void CommKokkos::forward_comm_device(Fix *fix, int size)
     DeviceType().fence();
   }
 }
+template void CommKokkos::forward_comm_device<LMPHostType>(Fix *fix, int size);
 
 /* ---------------------------------------------------------------------- */
 
@@ -1464,3 +1465,5 @@ void CommKokkos::forward_comm_array(int nsize, double **array)
   k_sendlist.sync<LMPHostType>();
   CommBrick::forward_comm_array(nsize,array);
 }
+
+
