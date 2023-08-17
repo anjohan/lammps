@@ -25,6 +25,7 @@ FixStyle(rigid/small/host,FixRigidSmallKokkos<LMPHostType>);
 #include "fix_rigid_small.h"
 #include "kokkos_base.h"
 #include "comm_kokkos.h"
+#include <map>
 
 struct TagInitialIntegrate{};
 struct TagPackForwardInitial{};
@@ -137,6 +138,12 @@ class FixRigidSmallKokkos : public FixRigidSmall, public KokkosBase {
   IntView1D d_atom2body;
   ImageIntView1D d_xcmimage;
   View2D d_displace, d_vatom, d_langextra;
+
+  int max_body_sent=0;
+  std::map<int,int> n_body_recv, first_body;
+  std::map<int,int> n_body_sent;
+  std::map<int,IntView1D> d_body_sendlists;
+
 
   IntView1D d_sendlist;
   View1D d_buf;

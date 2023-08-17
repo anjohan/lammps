@@ -242,8 +242,14 @@ void FixRigidSmallKokkos<DeviceType>::pre_neighbor(){
   );
 
   nghost_body = 0;
+  max_body_sent = 0;
+  n_body_recv.clear();
+  n_body_sent.clear();
+  first_body.clear();
+  commflag = BODY_SENDLIST;
+  commKK->forward_comm_device<DeviceType>(this, 1);
   commflag = FULL_BODY;
-  commKK->forward_comm_device<DeviceType>(this, 1+bodysize);
+  commKK->forward_comm_device<DeviceType>(this, bodysize);
   reset_atom2body();
   //check(4);
 
@@ -1138,14 +1144,15 @@ int FixRigidSmallKokkos<DeviceType>::pack_forward_comm_kokkos(int n, DAT::tdual_
   auto d_bodyown = this->d_bodyown;
 
   if (commflag == INITIAL) {
-    // TODO: Smarter packing, parallel_scan?
+    auto bodysize = this->bodysize;
+    int n_body = n_body_sent[iswap];
+    auto d_body_sendlist = d_body_sendlists[iswap];
     Kokkos::parallel_for("fix rigid/small pack forward comm initial",
-      Range1D(0, n),
-      KOKKOS_LAMBDA (const int i) {
-        int j = d_sendlist(i);
-        if (d_bodyown(j) < 0) return;
-        Body &b = d_body(d_bodyown(j));
-        int m = 29*i;
+      Range1D(0, n_body),
+      KOKKOS_LAMBDA (const int ibodysend) {
+        int ibody = d_body_sendlist(ibodysend);
+        Body &b = d_body(ibody);
+        int m = 29*ibodysend;
         d_buf(m++) = b.xcm[0];
         d_buf(m++) = b.xcm[1];
         d_buf(m++) = b.xcm[2];
@@ -1178,16 +1185,18 @@ int FixRigidSmallKokkos<DeviceType>::pack_forward_comm_kokkos(int n, DAT::tdual_
       }
     );
     Kokkos::Profiling::popRegion();
-    return 29*n;
+    return 29*n_body;
   }
   if (commflag == FINAL) {
-    Kokkos::parallel_for("fix rigid/small pack forward comm final",
-      Range1D(0, n),
-      KOKKOS_LAMBDA (const int i) {
-        int j = d_sendlist(i);
-        if (d_bodyown(j) < 0) return;
-        Body &b = d_body(d_bodyown(j));
-        int m = 10*i;
+    auto bodysize = this->bodysize;
+    int n_body = n_body_sent[iswap];
+    auto d_body_sendlist = d_body_sendlists[iswap];
+    Kokkos::parallel_for("fix rigid/small pack forward comm initial",
+      Range1D(0, n_body),
+      KOKKOS_LAMBDA (const int ibodysend) {
+        int ibody = d_body_sendlist(ibodysend);
+        Body &b = d_body(ibody);
+        int m = 10*ibodysend;
         d_buf(m++) = b.vcm[0];
         d_buf(m++) = b.vcm[1];
         d_buf(m++) = b.vcm[2];
@@ -1201,27 +1210,63 @@ int FixRigidSmallKokkos<DeviceType>::pack_forward_comm_kokkos(int n, DAT::tdual_
       }
     );
     Kokkos::Profiling::popRegion();
-    return 10*n;
+    return 10*n_body;
   } else if (commflag == FULL_BODY) {
     auto bodysize = this->bodysize;
-    // TODO: parallel_scan
+    int n_body = n_body_sent[iswap];
+    auto d_body_sendlist = d_body_sendlists[iswap];
     Kokkos::parallel_for(
       "fix rigid/small full body pack forward",
-      Range1D(0, n),
-      KOKKOS_LAMBDA(const int isend) {
-        int i = d_sendlist(isend);
-        int m = (1+bodysize)*isend;
+      Range1D(0, n_body),
+      KOKKOS_LAMBDA(const int ibodysend) {
+        int ibody = d_body_sendlist(ibodysend);
+        int m = (bodysize)*ibodysend;
 
-        if (d_bodyown(i) < 0) {
-          d_buf(m++) = 0;
-          return;
-        }
-        d_buf(m++) = 1;
-        memcpy(&d_buf(m), &d_body(d_bodyown(i)), sizeof(Body));
+        memcpy(&d_buf(m), &d_body(ibody), sizeof(Body));
       }
     );
     Kokkos::Profiling::popRegion();
-    return (1+bodysize)*n;
+    return bodysize*n_body;
+  } else if (commflag == BODY_SENDLIST) {
+    int n_sent = 0;
+    // TODO: parallel_scan
+    Kokkos::parallel_reduce(
+      "fix rigid/small count bodies sent",
+      Range1D(0, n),
+      KOKKOS_LAMBDA(const int isend, int &tmp) {
+        int i = d_sendlist(isend);
+        if (d_bodyown(i) >= 0) {
+          tmp++;
+          d_buf(isend) = 1;
+        } else {
+          d_buf(isend) = 0;
+        }
+      },
+      n_sent
+    );
+    n_body_sent[iswap] = n_sent;
+    if (n_sent > max_body_sent) max_body_sent = n_sent;
+
+    if (d_body_sendlists.count(iswap)==0 || d_body_sendlists[iswap].extent_int(0)<n_sent) {
+      d_body_sendlists[iswap] = IntView1D("body sendlist", n_sent);
+    }
+    auto d_body_sendlist = d_body_sendlists[iswap];
+
+    Kokkos::parallel_scan(
+      "fix rigid/small create body sendlist",
+      Range1D(0, n),
+      KOKKOS_LAMBDA(const int isend, int &count, const bool is_final) {
+        const int i = d_sendlist(isend);
+        if (d_bodyown(i) >= 0) {
+          if (is_final) {
+            d_body_sendlist(count) = d_bodyown(i);
+          }
+          count++;
+        }
+      }
+    );
+    Kokkos::Profiling::popRegion();
+    return n;
   }
 
   Kokkos::Profiling::popRegion();
@@ -1244,12 +1289,14 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
   auto d_body = this->d_body;
 
   if (commflag == INITIAL) {
+    int n_incoming_bodies = n_body_recv[first];
+    int start_body = first_body[first];
     Kokkos::parallel_for("fix rigid/small unpack forward comm initial",
-      Range1D(0, n),
-      KOKKOS_LAMBDA(const int i) {
-        if (d_bodyown(i+first) < 0) return;
-        int m = 29*i;
-        Body &b = d_body(d_bodyown(i+first));
+      Range1D(0, n_incoming_bodies),
+      KOKKOS_LAMBDA(const int ibodyrecv) {
+        int ibody = ibodyrecv + start_body;
+        int m = 29*ibodyrecv;
+        Body &b = d_body(ibody);
         b.xcm[0] = d_buf(m++);
         b.xcm[1] = d_buf(m++);
         b.xcm[2] = d_buf(m++);
@@ -1282,12 +1329,14 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
       }
     );
   } else if (commflag == FINAL) {
+    int n_incoming_bodies = n_body_recv[first];
+    int start_body = first_body[first];
     Kokkos::parallel_for("fix rigid/small/kk unpack forward comm final",
-      Range1D(0, n),
-      KOKKOS_LAMBDA(const int i) {
-        if (d_bodyown(i+first) < 0) return;
-        int m = 10*i;
-        Body &b = d_body(d_bodyown(i+first));
+      Range1D(0, n_incoming_bodies),
+      KOKKOS_LAMBDA(const int ibodyrecv) {
+        int ibody = ibodyrecv + start_body;
+        int m = 10*ibodyrecv;
+        Body &b = d_body(ibody);
         b.vcm[0] = d_buf(m++);
         b.vcm[1] = d_buf(m++);
         b.vcm[2] = d_buf(m++);
@@ -1303,14 +1352,30 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
   } else if (commflag == FULL_BODY) {
     Kokkos::Profiling::pushRegion("unpack forward full body");
     auto bodysize = this->bodysize;
+    int n_incoming_bodies = n_body_recv[first];
+    int start_body = first_body[first];
+
+    Kokkos::parallel_for(
+      "fix rigid/small pack incoming ghost bodies",
+      Range1D(0, n_incoming_bodies),
+      KOKKOS_LAMBDA(const int ibodyrecv) {
+        int m = ibodyrecv*(bodysize);
+        memcpy(&d_body(ibodyrecv+start_body), &d_buf(m), sizeof(Body));
+      }
+    );
+    Kokkos::Profiling::popRegion();
+  } else if (commflag == BODY_SENDLIST) {
+    Kokkos::Profiling::pushRegion("unpack forward body sendlist");
+    auto bodysize = this->bodysize;
     int n_curr_bodies = this->nlocal_body + this->nghost_body;
+    first_body[first] = n_curr_bodies;
     int n_incoming_bodies = 0;
     Kokkos::parallel_scan(
       "fix rigid/small count incoming bodies",
       Range1D(0, n),
       KOKKOS_LAMBDA(const int irecv, int &count, const bool is_final) {
         int i = irecv+first;
-        int m = irecv*(1+bodysize);
+        int m = irecv;
         d_bodyown(i) = d_buf(m);
         if (d_bodyown(i)) {
           if (is_final) d_bodyown(i) = n_curr_bodies + count;
@@ -1321,29 +1386,16 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
       },
       n_incoming_bodies
     );
+    if (n_body_recv.count(first)) {
+      error->one(FLERR, "first={} should not already be key", first);
+    }
+    n_body_recv[first] = n_incoming_bodies;
     while (n_curr_bodies+n_incoming_bodies > nmax_body) {
       grow_body();
     }
     d_body = this->d_body;
-    /*
-    if (n_incoming_bodies > 0) {
-      error->message(FLERR, "rank {} receiving {} ghost bodies, prev {}, local {}, max {}", comm->me, n_incoming_bodies, this->nghost_body, this->nlocal_body, nmax_body);
-    }
-    */
-    this->nghost_body += n_incoming_bodies;
 
-    //TODO: Optimize
-    Kokkos::parallel_for(
-      "fix rigid/small pack incoming ghost bodies",
-      Range1D(0, n),
-      KOKKOS_LAMBDA(const int irecv) {
-        int i = irecv+first;
-        int m = irecv*(1+bodysize);
-        if (d_bodyown(i) < 0) return;
-        // error->message(FLERR, "rank {} storing ghost body at {} from atom {} (#{}), len(d_body)={}", comm->me, d_bodyown(i), i, irecv, d_body.extent(0));
-        memcpy(&d_body(d_bodyown(i)), &d_buf(m+1), sizeof(Body));
-      }
-    );
+    this->nghost_body += n_incoming_bodies;
     Kokkos::Profiling::popRegion();
   }
   Kokkos::Profiling::popRegion();
@@ -1359,15 +1411,16 @@ int FixRigidSmallKokkos<DeviceType>::pack_reverse_comm_kokkos(int n, int first, 
   auto d_bodyown = this->d_bodyown;
   auto d_body = this->d_body;
 
+  int n_body = n_body_recv[first];
+  int start_body = first_body[first];
+
   Kokkos::parallel_for(
     "fix rigid/small pack reverse comm",
-    Range1D(0, n),
-    KOKKOS_LAMBDA(const int isend) {
-      int i = isend + first;
-      if (d_bodyown(i) < 0) return;
-
-      int m = isend*6;
-      Body &b = d_body(d_bodyown(i));
+    Range1D(0, n_body),
+    KOKKOS_LAMBDA(const int ibodysend) {
+      int ibody = ibodysend + start_body;
+      int m = ibodysend*6;
+      Body &b = d_body(ibody);
 
       d_buf(m++) = b.fcm[0];
       d_buf(m++) = b.fcm[1];
@@ -1378,7 +1431,7 @@ int FixRigidSmallKokkos<DeviceType>::pack_reverse_comm_kokkos(int n, int first, 
     }
   );
 
-  return 6*n;
+  return 6*n_body;
 }
 
 
@@ -1395,15 +1448,16 @@ void FixRigidSmallKokkos<DeviceType>::unpack_reverse_comm_kokkos(int n, DAT::tdu
   auto d_body = this->d_body;
   auto d_sendlist = Kokkos::subview(k_sendlist.view<DeviceType>(), iswap, Kokkos::ALL);
 
+  int n_body = n_body_sent[iswap];
+  auto d_body_sendlist = d_body_sendlists[iswap];
   Kokkos::parallel_for(
     "fix rigid/small unpack reverse comm",
-    Range1D(0, n),
-    KOKKOS_LAMBDA(const int irecv) {
-      int i = d_sendlist(irecv);
-      if (d_bodyown(i) < 0) return;
+    Range1D(0, n_body),
+    KOKKOS_LAMBDA (const int ibodyrecv) {
+      int ibody = d_body_sendlist(ibodyrecv);
+      Body &b = d_body(ibody);
+      int m = 6*ibodyrecv;
 
-      int m = irecv*6;
-      Body &b = d_body(d_bodyown(i));
       b.fcm[0] += d_buf(m++);
       b.fcm[1] += d_buf(m++);
       b.fcm[2] += d_buf(m++);
