@@ -1191,7 +1191,7 @@ int FixRigidSmallKokkos<DeviceType>::pack_forward_comm_kokkos(int n, DAT::tdual_
     auto bodysize = this->bodysize;
     int n_body = n_body_sent[iswap];
     auto d_body_sendlist = d_body_sendlists[iswap];
-    Kokkos::parallel_for("fix rigid/small pack forward comm initial",
+    Kokkos::parallel_for("fix rigid/small pack forward comm final",
       Range1D(0, n_body),
       KOKKOS_LAMBDA (const int ibodysend) {
         int ibody = d_body_sendlist(ibodysend);
