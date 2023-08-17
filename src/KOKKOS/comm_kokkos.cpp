@@ -27,6 +27,7 @@
 #include "force.h"
 #include "kokkos.h"
 #include "kokkos_base.h"
+#include "kokkos_type.h"
 #include "memory_kokkos.h"
 #include "modify.h"
 #include "output.h"
@@ -303,6 +304,18 @@ void CommKokkos::reverse_comm()
   //atomKK->sync(Device,ALL_MASK); // is this needed?
 }
 
+void CommKokkos::reverse_comm(Fix *fix, int size)
+{
+  //TODO: add  || reverse_fix_comm_classic
+  if (fix->execution_space == Host || !fix->reverse_comm_device) {
+    k_sendlist.sync<LMPHostType>();
+    CommBrick::reverse_comm(fix,size);
+  } else {
+    k_sendlist.sync<LMPDeviceType>();
+    reverse_comm_device<LMPDeviceType>(fix,size);
+  }
+}
+
 template<class DeviceType>
 void CommKokkos::reverse_comm_device()
 {
@@ -434,15 +447,17 @@ void CommKokkos::forward_comm_device(Fix *fix, int size)
     DeviceType().fence();
   }
 }
-template void CommKokkos::forward_comm_device<LMPHostType>(Fix *fix, int size);
+//template void CommKokkos::forward_comm_device<LMPHostType>(Fix *fix, int size);
 
 /* ---------------------------------------------------------------------- */
 
+/*
 void CommKokkos::reverse_comm(Fix *fix, int size)
 {
   k_sendlist.sync<LMPHostType>();
   CommBrick::reverse_comm(fix, size);
 }
+*/
 
 void CommKokkos::forward_comm(Compute *compute)
 {
@@ -616,6 +631,71 @@ void CommKokkos::reverse_comm_device(Pair *pair)
     DeviceType().fence();
   }
 }
+
+template<class DeviceType>
+void CommKokkos::reverse_comm_device(Fix *fix, int size)
+{
+  int iswap,n,nsize;
+  MPI_Request request;
+  DAT::tdual_xfloat_1d k_buf_tmp;
+
+  KokkosBase* fixKKBase = dynamic_cast<KokkosBase*>(fix);
+
+  if (size) nsize = size;
+  else nsize = fix->comm_reverse;
+
+  int nmax = max_buf_fix;
+  for (iswap = 0; iswap < nswap; iswap++) {
+    nmax = MAX(nmax,nsize*sendnum[iswap]);
+    nmax = MAX(nmax,nsize*recvnum[iswap]);
+  }
+  if (nmax > max_buf_fix)
+    grow_buf_fix(nmax);
+
+  for (iswap = nswap-1; iswap >= 0; iswap--) {
+
+    // pack buffer
+
+    n = fixKKBase->pack_reverse_comm_kokkos(recvnum[iswap],firstrecv[iswap],k_buf_send_fix);
+    DeviceType().fence();
+
+    // exchange with another proc
+    // if self, set recv buffer to send buffer
+
+    double* buf_send_fix;
+    double* buf_recv_fix;
+    if (lmp->kokkos->gpu_aware_flag) {
+      buf_send_fix = k_buf_send_fix.view<DeviceType>().data();
+      buf_recv_fix = k_buf_recv_fix.view<DeviceType>().data();
+    } else {
+      k_buf_send_fix.modify<DeviceType>();
+      k_buf_send_fix.sync<LMPHostType>();
+      buf_send_fix = k_buf_send_fix.h_view.data();
+      buf_recv_fix = k_buf_recv_fix.h_view.data();
+    }
+
+    if (sendproc[iswap] != me) {
+      if (sendnum[iswap])
+        MPI_Irecv(buf_recv_fix,nsize*sendnum[iswap],MPI_DOUBLE,sendproc[iswap],0,world,&request);
+      if (recvnum[iswap])
+        MPI_Send(buf_send_fix,n,MPI_DOUBLE,recvproc[iswap],0,world);
+      if (sendnum[iswap]) MPI_Wait(&request,MPI_STATUS_IGNORE);
+
+      if (!lmp->kokkos->gpu_aware_flag) {
+        k_buf_recv_fix.modify<LMPHostType>();
+        k_buf_recv_fix.sync<DeviceType>();
+      }
+      k_buf_tmp = k_buf_recv_fix;
+    } else k_buf_tmp = k_buf_send_fix;
+
+    // unpack buffer
+
+    fixKKBase->unpack_reverse_comm_kokkos(sendnum[iswap],k_sendlist,
+                                       iswap,k_buf_tmp);
+    DeviceType().fence();
+  }
+}
+template void CommKokkos::forward_comm_device<LMPHostType>(Fix *fix, int size);
 
 void CommKokkos::forward_comm(Dump *dump)
 {

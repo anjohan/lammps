@@ -185,7 +185,7 @@ void FixRigidSmallKokkos<DeviceType>::setup(int vflag)
   exchange_comm_device = 1;
   forward_comm_device = 1;
   sort_device = 1;
-  // reverse_comm_device = 1; TODO: Add to commKK
+  reverse_comm_device = 1;
 }
 
 template<class DeviceType>
@@ -491,23 +491,20 @@ void FixRigidSmallKokkos<DeviceType>::compute_forces_and_torques_kokkos()
     }
   );
 
-  Kokkos::Profiling::pushRegion("data copy and reverse communicate");
-  copy_body_host();
-
-  auto h_bodyown = Kokkos::create_mirror_view_and_copy(LMPHostType(), d_bodyown);
-  for(int i = 0; i < nlocal+nghost; i++){
-    bodyown[i] = h_bodyown(i);
-  }
 
   // reverse communicate fcm, torque of all bodies
 
+  Kokkos::Profiling::pushRegion("reverse communicate");
   commflag = FORCE_TORQUE;
-  comm->reverse_comm(this,6);
+  commKK->reverse_comm_device<DeviceType>(this,6);
+  Kokkos::Profiling::popRegion();
 
   // include Langevin thermostat forces and torques
 
   // TODO: GPU langevin
   if (langflag) {
+    Kokkos::Profiling::pushRegion("rigid/small langevin");
+    copy_body_host();
     for (int ibody = 0; ibody < nlocal_body; ibody++) {
       double *fcm = body[ibody].fcm;
       fcm[0] += langextra[ibody][0];
@@ -518,9 +515,9 @@ void FixRigidSmallKokkos<DeviceType>::compute_forces_and_torques_kokkos()
       tcm[1] += langextra[ibody][4];
       tcm[2] += langextra[ibody][5];
     }
+    copy_body_device();
+    Kokkos::Profiling::popRegion();
   }
-  copy_body_device();
-  Kokkos::Profiling::popRegion();
 
   // add gravity force to COM of each body
 
@@ -537,17 +534,6 @@ void FixRigidSmallKokkos<DeviceType>::compute_forces_and_torques_kokkos()
     }
   }
 
-  /*
-  printf("rank %d forces on bodies\n", comm->me);
-  for(int ibody = 0; ibody < nlocal_body; ibody++){
-    Body &b = d_body(ibody);
-    printf("%d local %.2f %.2f %.2f\n", ibody, b.fcm[0], b.fcm[1], b.fcm[2]);
-  }
-  for(int ibody = nlocal_body; ibody < nlocal_body+nghost_body; ibody++){
-    Body &b = d_body(ibody);
-    printf("%d ghost %.2f %.2f %.2f\n", ibody, b.fcm[0], b.fcm[1], b.fcm[2]);
-  }
-  */
   Kokkos::Profiling::popRegion();
 }
 
@@ -677,10 +663,10 @@ void FixRigidSmallKokkos<DeviceType>::set_xv_kokkos(int setxflag)
   }
   copymode = 1;
   if (setxflag) {
-    Kokkos::parallel_reduce(Kokkos::RangePolicy<DeviceType, TagSetXV<1>>(0, nlocal), *this, ev);
-    Kokkos::parallel_for(Kokkos::RangePolicy<DeviceType, TagUpdateXGC>(0, nlocal_body+nghost_body), *this);
+    Kokkos::parallel_reduce("fix rigid/small setxv", Kokkos::RangePolicy<DeviceType, TagSetXV<1>>(0, nlocal), *this, ev);
+    Kokkos::parallel_for("fix rigid/small update xgc", Kokkos::RangePolicy<DeviceType, TagUpdateXGC>(0, nlocal_body+nghost_body), *this);
   } else {
-    Kokkos::parallel_reduce(Kokkos::RangePolicy<DeviceType, TagSetXV<0>>(0, nlocal), *this, ev);
+    Kokkos::parallel_reduce("fix rigid/small setv", Kokkos::RangePolicy<DeviceType, TagSetXV<0>>(0, nlocal), *this, ev);
   }
   copymode = 0;
   if(evflag){
@@ -1361,6 +1347,71 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
     Kokkos::Profiling::popRegion();
   }
   Kokkos::Profiling::popRegion();
+}
+template<class DeviceType>
+int FixRigidSmallKokkos<DeviceType>::pack_reverse_comm_kokkos(int n, int first, DAT::tdual_xfloat_1d &k_buf)
+{
+  if (commflag != FORCE_TORQUE) {
+    error->all(FLERR, "attempting invalid reverse comm on device");
+  }
+
+  auto d_buf = k_buf.view<DeviceType>();
+  auto d_bodyown = this->d_bodyown;
+  auto d_body = this->d_body;
+
+  Kokkos::parallel_for(
+    "fix rigid/small pack reverse comm",
+    Range1D(0, n),
+    KOKKOS_LAMBDA(const int isend) {
+      int i = isend + first;
+      if (d_bodyown(i) < 0) return;
+
+      int m = isend*6;
+      Body &b = d_body(d_bodyown(i));
+
+      d_buf(m++) = b.fcm[0];
+      d_buf(m++) = b.fcm[1];
+      d_buf(m++) = b.fcm[2];
+      d_buf(m++) = b.torque[0];
+      d_buf(m++) = b.torque[1];
+      d_buf(m++) = b.torque[2];
+    }
+  );
+
+  return 6*n;
+}
+
+
+template<class DeviceType>
+void FixRigidSmallKokkos<DeviceType>::unpack_reverse_comm_kokkos(int n, DAT::tdual_int_2d k_sendlist,
+                                          int iswap, DAT::tdual_xfloat_1d &k_buf)
+{
+  if (commflag != FORCE_TORQUE) {
+    error->all(FLERR, "attempting invalid reverse comm on device");
+  }
+
+  auto d_buf = k_buf.view<DeviceType>();
+  auto d_bodyown = this->d_bodyown;
+  auto d_body = this->d_body;
+  auto d_sendlist = Kokkos::subview(k_sendlist.view<DeviceType>(), iswap, Kokkos::ALL);
+
+  Kokkos::parallel_for(
+    "fix rigid/small unpack reverse comm",
+    Range1D(0, n),
+    KOKKOS_LAMBDA(const int irecv) {
+      int i = d_sendlist(irecv);
+      if (d_bodyown(i) < 0) return;
+
+      int m = irecv*6;
+      Body &b = d_body(d_bodyown(i));
+      b.fcm[0] += d_buf(m++);
+      b.fcm[1] += d_buf(m++);
+      b.fcm[2] += d_buf(m++);
+      b.torque[0] += d_buf(m++);
+      b.torque[1] += d_buf(m++);
+      b.torque[2] += d_buf(m++);
+    }
+  );
 }
 
 /* ----------------------------------------------------------------------

@@ -72,6 +72,10 @@ class FixRigidSmallKokkos : public FixRigidSmall, public KokkosBase {
                                int iswap_in, DAT::tdual_xfloat_1d &k_buf,
                                int pbc_flag, int* pbc) override;
   void unpack_forward_comm_kokkos(int, int, DAT::tdual_xfloat_1d&) override;
+
+  int pack_reverse_comm_kokkos(int, int, DAT::tdual_xfloat_1d &) override;
+  void unpack_reverse_comm_kokkos(int, DAT::tdual_int_2d,
+                                          int, DAT::tdual_xfloat_1d &) override;
   // reverse comm handled by host,
   // only happens when body and bodyown
   // are already on host

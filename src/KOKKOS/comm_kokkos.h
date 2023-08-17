@@ -61,6 +61,7 @@ class CommKokkos : public CommBrick {
   template<class DeviceType> void forward_comm_device(Pair *pair);
   template<class DeviceType> void reverse_comm_device(Pair *pair);
   template<class DeviceType> void forward_comm_device(Fix *fix, int size=0);
+  template<class DeviceType> void reverse_comm_device(Fix *fix, int size=0);
   template<class DeviceType> void exchange_device();
   template<class DeviceType> void borders_device();
 
