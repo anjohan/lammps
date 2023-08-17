@@ -545,6 +545,7 @@ void CommKokkos::forward_comm_device(Pair *pair)
     DeviceType().fence();
   }
 }
+template void CommKokkos::forward_comm_device<LMPHostType>(Fix *fix, int size);
 
 void CommKokkos::grow_buf_pair(int n) {
   max_buf_pair = n * BUFFACTOR;
@@ -695,7 +696,7 @@ void CommKokkos::reverse_comm_device(Fix *fix, int size)
     DeviceType().fence();
   }
 }
-template void CommKokkos::forward_comm_device<LMPHostType>(Fix *fix, int size);
+template void CommKokkos::reverse_comm_device<LMPHostType>(Fix *fix, int size);
 
 void CommKokkos::forward_comm(Dump *dump)
 {
