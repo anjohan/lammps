@@ -1387,7 +1387,7 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
       n_incoming_bodies
     );
     if (n_body_recv.count(first)) {
-      error->one(FLERR, "first={} should not already be key", first);
+      error->one(FLERR, "first={} should not already be key, receiving {} atoms {} bodies", first, n, n_incoming_bodies);
     }
     n_body_recv[first] = n_incoming_bodies;
     while (n_curr_bodies+n_incoming_bodies > nmax_body) {
@@ -1476,10 +1476,11 @@ template<class DeviceType>
 void FixRigidSmallKokkos<DeviceType>::grow_body()
 {
   Kokkos::Profiling::pushRegion("rigid/small grow body");
+
   // In set_molecule, CPU code calls grow_body first
   // Want to not double grow
-
-  if (nmax_body == d_body.extent_int(0)) {
+  // Still need to do it during initial FULL_BODY unpack forward comm
+  if (nmax_body == d_body.extent_int(0) || d_body.extent_int(0) == 0) {
     FixRigidSmall::grow_body();
   }
   Kokkos::resize(d_body, nmax_body);
