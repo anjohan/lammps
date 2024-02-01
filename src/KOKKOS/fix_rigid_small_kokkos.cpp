@@ -1289,8 +1289,12 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
   auto d_body = this->d_body;
 
   if (commflag == INITIAL) {
-    int n_incoming_bodies = n_body_recv[first];
-    int start_body = first_body[first];
+    if (n_body_recv.count(recv_iswap)==0){
+      error->one(FLERR, "recv_iswap = {}, me = {}, n = {}, first = {}", recv_iswap, comm->me, n, first);
+    }
+    error->message(FLERR, "recv_iswap = {}", recv_iswap);
+    int n_incoming_bodies = n_body_recv.at(recv_iswap);
+    int start_body = first_body.at(recv_iswap);
     Kokkos::parallel_for("fix rigid/small unpack forward comm initial",
       Range1D(0, n_incoming_bodies),
       KOKKOS_LAMBDA(const int ibodyrecv) {
@@ -1329,8 +1333,8 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
       }
     );
   } else if (commflag == FINAL) {
-    int n_incoming_bodies = n_body_recv[first];
-    int start_body = first_body[first];
+    int n_incoming_bodies = n_body_recv.at(recv_iswap);
+    int start_body = first_body.at(recv_iswap);
     Kokkos::parallel_for("fix rigid/small/kk unpack forward comm final",
       Range1D(0, n_incoming_bodies),
       KOKKOS_LAMBDA(const int ibodyrecv) {
@@ -1352,8 +1356,8 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
   } else if (commflag == FULL_BODY) {
     Kokkos::Profiling::pushRegion("unpack forward full body");
     auto bodysize = this->bodysize;
-    int n_incoming_bodies = n_body_recv[first];
-    int start_body = first_body[first];
+    int n_incoming_bodies = n_body_recv.at(recv_iswap);
+    int start_body = first_body.at(recv_iswap);
 
     Kokkos::parallel_for(
       "fix rigid/small pack incoming ghost bodies",
@@ -1368,7 +1372,7 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
     Kokkos::Profiling::pushRegion("unpack forward body sendlist");
     auto bodysize = this->bodysize;
     int n_curr_bodies = this->nlocal_body + this->nghost_body;
-    first_body[first] = n_curr_bodies;
+    first_body[recv_iswap] = n_curr_bodies;
     int n_incoming_bodies = 0;
     Kokkos::parallel_scan(
       "fix rigid/small count incoming bodies",
@@ -1386,10 +1390,10 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
       },
       n_incoming_bodies
     );
-    if (n_body_recv.count(first)) {
-      error->one(FLERR, "first={} should not already be key, receiving {} atoms {} bodies", first, n, n_incoming_bodies);
+    if (n_body_recv.count(recv_iswap)) {
+      error->one(FLERR, "recv_iswap={} should not already be key, receiving {} atoms {} bodies", recv_iswap, n, n_incoming_bodies);
     }
-    n_body_recv[first] = n_incoming_bodies;
+    n_body_recv[recv_iswap] = n_incoming_bodies;
     while (n_curr_bodies+n_incoming_bodies > nmax_body) {
       grow_body();
     }
@@ -1398,6 +1402,10 @@ void FixRigidSmallKokkos<DeviceType>::unpack_forward_comm_kokkos(int n, int firs
     this->nghost_body += n_incoming_bodies;
     Kokkos::Profiling::popRegion();
   }
+  // Update and reset comm counter
+  recv_iswap++;
+  if (recv_iswap == commKK->nswap) recv_iswap = 0;
+
   Kokkos::Profiling::popRegion();
 }
 template<class DeviceType>
@@ -1411,8 +1419,8 @@ int FixRigidSmallKokkos<DeviceType>::pack_reverse_comm_kokkos(int n, int first, 
   auto d_bodyown = this->d_bodyown;
   auto d_body = this->d_body;
 
-  int n_body = n_body_recv[first];
-  int start_body = first_body[first];
+  int n_body = n_body_recv.at(recv_iswap);
+  int start_body = first_body.at(recv_iswap);
 
   Kokkos::parallel_for(
     "fix rigid/small pack reverse comm",
@@ -1430,6 +1438,9 @@ int FixRigidSmallKokkos<DeviceType>::pack_reverse_comm_kokkos(int n, int first, 
       d_buf(m++) = b.torque[2];
     }
   );
+
+  recv_iswap++;
+  if (recv_iswap == commKK->nswap) recv_iswap = 0;
 
   return 6*n_body;
 }

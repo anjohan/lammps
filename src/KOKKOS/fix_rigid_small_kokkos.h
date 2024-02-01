@@ -144,6 +144,9 @@ class FixRigidSmallKokkos : public FixRigidSmall, public KokkosBase {
   std::map<int,int> n_body_sent;
   std::map<int,IntView1D> d_body_sendlists;
 
+  // counter to figure out which processor is sending data to me,
+  // which can be mapped to first_body (note: atom "first" is not unique)
+  int recv_iswap = 0;
 
   IntView1D d_sendlist;
   View1D d_buf;

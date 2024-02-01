@@ -47,9 +47,9 @@ class CommBrick : public Comm {
   void forward_comm_array(int, double **) override;            // forward comm of array
   void *extract(const char *, int &) override;
   double memory_usage() override;
+  int nswap;                            // # of swaps to perform = sum of maxneed
 
  protected:
-  int nswap;                            // # of swaps to perform = sum of maxneed
   int recvneed[3][2];                   // # of procs away I recv atoms from
   int sendneed[3][2];                   // # of procs away I send atoms to
   int maxneed[3];                       // max procs away any proc needs, per dim
