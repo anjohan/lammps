@@ -150,6 +150,10 @@ void CommBrickDirect::init()
 
   // disallow options not supported by CommBrickDirect
 
+  if (layout != LAYOUT_UNIFORM)
+    error->all(FLERR,
+               "Comm brick/direct does not yet support a non-uniform processor grid");
+
   if (mode == Comm::MULTI || mode == Comm::MULTIOLD)
     error->all(FLERR,
                "Comm brick/direct does not yet support multi or multi/old");
