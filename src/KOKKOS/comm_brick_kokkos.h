@@ -41,9 +41,9 @@ class CommBrickKokkos : public CommBrick {
 
   using CommBrick::forward_comm;
   using CommBrick::reverse_comm;
-  void forward_comm(int dummy = 0) override;    // forward comm of atom coords
+  virtual void forward_comm(int dummy = 0) override;    // forward comm of atom coords
   void reverse_comm() override;                 // reverse comm of atom coords
-  void exchange() override;                     // move atoms to new procs
+  virtual void exchange() override;                     // move atoms to new procs
   void borders() override;                      // setup list of atoms to comm
 
   void forward_comm(class Pair *) override;                 // forward comm from a Pair

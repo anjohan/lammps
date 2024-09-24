@@ -349,6 +349,7 @@ int AtomVecAtomicKokkos::pack_exchange_kokkos(const int &nsend,DAT::tdual_xfloat
   size_exchange = 11;
 
   if (nsend > (int) (k_buf.view<LMPHostType>().extent(0)*k_buf.view<LMPHostType>().extent(1))/size_exchange) {
+    if (k_buf.h_view.size() == 0) error->all(FLERR, "k_buf zero size");
     int newsize = nsend*size_exchange/k_buf.view<LMPHostType>().extent(1)+1;
     k_buf.resize(newsize,k_buf.view<LMPHostType>().extent(1));
   }

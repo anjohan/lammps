@@ -34,6 +34,7 @@ class CommBrickDirectKokkos : public CommBrickDirect {
   void borders() override;                      // setup list of atoms to comm
 
   template<class DeviceType> void forward_comm_device();
+  template<class DeviceType> void exchange_device();
 
  private:
   DAT::tdual_xfloat_1d k_buf_send_direct,k_buf_recv_direct;
@@ -45,6 +46,13 @@ class CommBrickDirectKokkos : public CommBrickDirect {
   DAT::tdual_int_1d k_sendnum_scan_direct;
   DAT::tdual_int_1d k_self_flag;
   int totalsend;
+
+  DAT::tdual_int_scalar k_count;
+  DAT::tdual_xfloat_2d k_buf_send,k_buf_recv;
+  DAT::tdual_int_1d k_exchange_sendlist,k_exchange_copylist,k_indices;
+
+  void grow_send_kokkos(int, int, ExecutionSpace space = Host);
+  void grow_recv_kokkos(int, ExecutionSpace space = Host);
 
   void grow_send_direct(int, int) override;
   void grow_recv_direct(int) override;
