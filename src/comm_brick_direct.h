@@ -27,7 +27,7 @@ class CommBrickDirect : public CommBrick {
   void init() override;                         // init error checks
   virtual void setup() override;                        // setup direct comm data structs
   virtual void forward_comm(int dummy = 0) override;    // forward comm of atom coords
-  void reverse_comm() override;                 // reverse comm of forces
+  virtual void reverse_comm() override;                 // reverse comm of forces
   virtual void borders() override;                      // setup list of atoms to comm
 
   void forward_comm(class Pair *) override;                 // forward comm from a Pair

@@ -34,6 +34,7 @@ class CommBrickDirectKokkos : public CommBrickDirect {
   void borders() override;                      // setup list of atoms to comm
 
   template<class DeviceType> void forward_comm_device();
+  template<class DeviceType> void reverse_comm_device();
   template<class DeviceType> void exchange_device();
 
  private:

@@ -233,17 +233,68 @@ void CommBrickDirectKokkos::forward_comm_device()
 
 void CommBrickDirectKokkos::reverse_comm()
 {
-  if (comm_f_only)
+  int reverse_comm_classic = lmp->kokkos->reverse_comm_classic || !comm_f_only;
+  int reverse_comm_on_host = lmp->kokkos->reverse_comm_on_host;
+
+  if (!reverse_comm_classic) {
+    if (reverse_comm_on_host) reverse_comm_device<LMPHostType>();
+    else reverse_comm_device<LMPDeviceType>();
+    return;
+  }
+
+  if (comm_f_only) {
     atomKK->sync(Host,F_MASK);
-  else
+    atomKK->modified(Host,F_MASK);
+  } else {
     atomKK->sync(Host,ALL_MASK);
+    atomKK->modified(Host,ALL_MASK);
+  }
 
   CommBrickDirect::reverse_comm();
+}
 
-  if (comm_f_only)
-    atomKK->modified(Host,F_MASK);
-  else
-    atomKK->modified(Host,ALL_MASK);
+template<class DeviceType>
+void CommBrickDirectKokkos::reverse_comm_device()
+{
+  double *buf;
+
+  // post all receives for ghost atoms
+  // except for self copies
+
+  int offset;
+
+  if (!comm_f_only) error->all(FLERR, "Only f reverse comm supported in comm brick/direct on device");
+
+  offset = 0;
+  int npost = 0;
+  for (int iswap = 0; iswap < ndirect; iswap++) {
+    if (sendnum_direct[iswap]) {
+      int n = sendnum_direct[iswap]*atomKK->avecKK->size_forward;
+      if (proc_direct[iswap] != me)
+        MPI_Irecv(k_buf_send_direct.view<DeviceType>().data() + offset,n,MPI_DOUBLE,proc_direct[iswap],sendtag[iswap],world,&requests[npost++]);
+      offset += n;
+    }
+  }
+
+  for (int iswap = 0; iswap < ndirect; iswap++) {
+    if (proc_direct[iswap] == me) continue;
+    if (size_forward_recv_direct[iswap]) {
+      buf = atomKK->k_f.view<DeviceType>().data() + firstrecv_direct[iswap]*atomKK->k_f.view<DeviceType>().extent(1);
+      MPI_Send(buf,size_forward_recv_direct[iswap],MPI_DOUBLE,
+                proc_direct[iswap],recvtag[iswap],world);
+    }
+  }
+
+  if (npost == 0) return;
+
+  MPI_Waitall(npost,requests,MPI_STATUS_IGNORE);
+
+  // pack all atom data at once, including copying self data
+
+  atomKK->avecKK->unpack_reverse_comm_direct(totalsend,k_sendatoms_list,
+                      k_sendnum_scan_direct,k_firstrecv_direct,
+                      k_swap2list,k_buf_send_direct,k_self_flag);
+  DeviceType().fence();
 }
 
 /* ----------------------------------------------------------------------
@@ -267,7 +318,7 @@ void CommBrickDirectKokkos::exchange()
   }
 
   if (atom->nextra_grow)
-    error->all(FLERR, "Fixes with extra communication not supported with comm/brick/direct/kk");
+    error->all(FLERR, "Fixes with extra communication not supported with comm brick/direct/kk");
 
   if (lmp->kokkos->exchange_comm_on_host)
     exchange_device<LMPHostType>();
