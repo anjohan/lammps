@@ -236,7 +236,7 @@ void CommBrickDirectKokkos::reverse_comm()
   int reverse_comm_classic = lmp->kokkos->reverse_comm_classic || !comm_f_only;
   int reverse_comm_on_host = lmp->kokkos->reverse_comm_on_host;
 
-  if (!reverse_comm_classic) {
+  if (0==1 && !reverse_comm_classic) {
     if (reverse_comm_on_host) reverse_comm_device<LMPHostType>();
     else reverse_comm_device<LMPDeviceType>();
     return;
@@ -257,6 +257,7 @@ template<class DeviceType>
 void CommBrickDirectKokkos::reverse_comm_device()
 {
   double *buf;
+  error->all(FLERR, "reverse_comm");
 
   // post all receives for ghost atoms
   // except for self copies

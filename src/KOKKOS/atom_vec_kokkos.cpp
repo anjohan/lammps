@@ -316,8 +316,9 @@ template<class DeviceType>
 struct AtomVecKokkos_UnPackReverseCommDirect {
   typedef DeviceType device_type;
 
+  typename ArrayTypes<DeviceType>::t_f_array _f;
   using ScatterFView = Kokkos::Experimental::ScatterView<F_FLOAT*[3], Kokkos::LayoutRight, typename DeviceType::memory_space>;
-  ScatterFView _f;
+  ScatterFView _f_scatter;
   typename ArrayTypes<DeviceType>::t_int_2d_const _list;
   typename ArrayTypes<DeviceType>::t_int_1d_const _firstrecv;
   typename ArrayTypes<DeviceType>::t_int_1d_const _sendnum_scan;
@@ -326,7 +327,7 @@ struct AtomVecKokkos_UnPackReverseCommDirect {
   typename ArrayTypes<DeviceType>::t_int_1d_const _self_flag;
 
   AtomVecKokkos_UnPackReverseCommDirect(
-      const ScatterFView &f,
+      const typename DAT::tdual_f_array &f,
       const typename DAT::tdual_xfloat_1d &buf,
       const typename DAT::tdual_int_2d &list,
       const typename DAT::tdual_int_1d &firstrecv,
@@ -334,7 +335,7 @@ struct AtomVecKokkos_UnPackReverseCommDirect {
       const typename DAT::tdual_int_1d &swap2list,
       const typename DAT::tdual_int_1d &self_flag
       ):
-      _f(f),
+      _f(f.view<DeviceType>()),
       _list(list.view<DeviceType>()),
       _firstrecv(firstrecv.view<DeviceType>()),
       _sendnum_scan(sendnum_scan.view<DeviceType>()),
@@ -344,6 +345,7 @@ struct AtomVecKokkos_UnPackReverseCommDirect {
         const size_t maxsend = buf.view<DeviceType>().extent(0)/3;
         const size_t elements = 3;
         buffer_view<DeviceType>(_buf,buf,maxsend,elements);
+        _f_scatter = ScatterFView(_f);
       };
 
   KOKKOS_INLINE_FUNCTION
@@ -360,15 +362,21 @@ struct AtomVecKokkos_UnPackReverseCommDirect {
     const int ilist = _swap2list[iswap];
     const int j = _list(ilist,i);
 
+    auto f = _f_scatter.access();
+
     if (_self_flag(iswap)) {
-        _f(j,0) += _f(i+_nfirst,0);
-        _f(j,1) += _f(i+_nfirst,1);
-        _f(j,2) += _f(i+_nfirst,2);
+        f(j,0) += _f(i+_nfirst,0);
+        f(j,1) += _f(i+_nfirst,1);
+        f(j,2) += _f(i+_nfirst,2);
     } else {
-        _f(j,0) += _buf(ii,0);
-        _f(j,1) += _buf(ii,1);
-        _f(j,2) += _buf(ii,2);
+        f(j,0) += _buf(ii,0);
+        f(j,1) += _buf(ii,1);
+        f(j,2) += _buf(ii,2);
     }
+  }
+
+  void contribute() {
+    Kokkos::Experimental::contribute(_f, _f_scatter);
   }
 };
 
@@ -383,19 +391,15 @@ int AtomVecKokkos::unpack_reverse_comm_direct(const int &n, const DAT::tdual_int
 {
   if (lmp->kokkos->forward_comm_on_host) {
     atomKK->sync(Host,F_MASK);
-      struct AtomVecKokkos_PackCommDirect<LMPHostType> f(atomKK->k_x,buf,list,pbc,pbc_flag,firstrecv,sendnum_scan,swap2list,
-        k_self_flag,
-        domain->xprd,domain->yprd,domain->zprd,
-        domain->xy,domain->xz,domain->yz);
-      Kokkos::parallel_for(n,f);
+    struct AtomVecKokkos_UnPackReverseCommDirect<LMPHostType> f(atomKK->k_f,buf,list,firstrecv,sendnum_scan,swap2list,k_self_flag);
+    Kokkos::parallel_for(n,f);
+    f.contribute();
     atomKK->modified(Host,F_MASK);
   } else {
     atomKK->sync(Device,F_MASK);
-      struct AtomVecKokkos_PackCommDirect<LMPDeviceType> f(atomKK->k_x,buf,list,pbc,pbc_flag,firstrecv,sendnum_scan,swap2list,
-        k_self_flag,
-        domain->xprd,domain->yprd,domain->zprd,
-        domain->xy,domain->xz,domain->yz);
-      Kokkos::parallel_for(n,f);
+    struct AtomVecKokkos_UnPackReverseCommDirect<LMPDeviceType> f(atomKK->k_f,buf,list,firstrecv,sendnum_scan,swap2list,k_self_flag);
+    Kokkos::parallel_for(n,f);
+    f.contribute();
     atomKK->modified(Device,F_MASK);
   }
 
