@@ -160,9 +160,26 @@ void ComputePACE<PERATOM>::init()
   if (modify->get_compute_by_style(style).size() > 1 && comm->me == 0)
     error->warning(FLERR,"More than one compute {}", style);
 
+  // build the evaluator once per init, reused across all atoms and timesteps
+  delete acecimpl->ace;
+  acecimpl->ace = new ACECTildeEvaluator(*acecimpl->basis_set);
+  acecimpl->ace->compute_projections = true;
+  acecimpl->ace->compute_b_grad = !PERATOM;
+
+  const int ntypes = atom->ntypes;
+  acecimpl->ace->element_type_mapping.init(ntypes + 1);
+  for (int ik = 1; ik <= ntypes; ik++) {
+    map[ik] = ik - 1;
+    acecimpl->ace->element_type_mapping(ik) = ik - 1;
+  }
+
   if constexpr (!PERATOM) {
 
-    // allocate memory for global array
+    // allocate memory for global array; init() runs at the start of every run,
+    // so free any prior allocation first to support multiple run commands
+
+    memory->destroy(pace);
+    memory->destroy(paceall);
     memory->create(pace,size_array_rows,size_array_cols, "pace:pace");
     memory->create(paceall,size_array_rows,size_array_cols, "pace:paceall");
     array = paceall;
@@ -172,10 +189,13 @@ void ComputePACE<PERATOM>::init()
     c_pe = modify->get_compute_by_id("thermo_pe");
     if (!c_pe) error->all(FLERR,"Compute thermo_pe does not exist.");
 
-    // add compute for reference virial tensor
+    // add compute for reference virial tensor; add it only once, since init()
+    // runs every run and re-adding the same compute id is an error
 
     id_virial = id + std::string("_press");
-    c_virial = modify->add_compute(id_virial + " all pressure NULL virial");
+    c_virial = modify->get_compute_by_id(id_virial);
+    if (!c_virial)
+      c_virial = modify->add_compute(id_virial + " all pressure NULL virial");
   }
 }
 
@@ -188,31 +208,17 @@ void ComputePACE<PERATOM>::init_list(int /*id*/, NeighList *ptr)
 }
 
 /* ----------------------------------------------------------------------
-   shared ACE kernel: build the evaluator for atom i and run compute_atom.
-   afterwards acecimpl->ace->projections holds the descriptors B_{i,nu};
-   for the global compute (PERATOM=0) acecimpl->ace->neighbours_dB also
-   holds the descriptor gradients used to assemble forces/virial.
+   shared ACE kernel: run compute_atom for atom i.
+   The evaluator is built once in init() and reused across all atoms
+   and timesteps; the neighbour cache is resized once per invocation
+   before the atom loop.  After this call, acecimpl->ace->projections
+   holds the descriptors B_{i,nu}; for PERATOM=0, neighbours_dB holds
+   the descriptor gradients used to assemble forces/virial.
 ------------------------------------------------------------------------- */
 
 template<int PERATOM>
-void ComputePACE<PERATOM>::eval_atom(int i, int max_jnum, int ntypes)
+void ComputePACE<PERATOM>::eval_atom(int i)
 {
-  delete acecimpl->ace;
-  acecimpl->ace = new ACECTildeEvaluator(*acecimpl->basis_set);
-  acecimpl->ace->compute_projections = true;
-  acecimpl->ace->compute_b_grad = !PERATOM;    // gradients only needed for global array
-
-  acecimpl->ace->element_type_mapping.init(ntypes+1);
-  for (int ik = 1; ik <= ntypes; ik++) {
-    for (int mu = 0; mu < acecimpl->basis_set->nelements; mu++) {
-      if (mu == ik - 1) {
-        map[ik] = mu;
-        acecimpl->ace->element_type_mapping(ik) = mu;
-      }
-    }
-  }
-
-  acecimpl->ace->resize_neighbours_cache(max_jnum);
   acecimpl->ace->compute_atom(i, atom->x, atom->type, list->numneigh[i], list->firstneigh[i]);
 }
 
@@ -261,23 +267,18 @@ void ComputePACE<PERATOM>::compute_array()
   int * const type = atom->type;
 
   //determine the maximum number of neighbours
-  int max_jnum = -1;
-  int nei = 0;
-  int jtmp =0;
-  for (int iitmp = 0; iitmp < list->inum; iitmp++) {
-    int itmp = ilist[iitmp];
-    jtmp = numneigh[itmp];
-    nei = nei + jtmp;
-    if (jtmp > max_jnum){
-      max_jnum = jtmp;
-    }
+  int max_jnum = 0;
+  for (int iitmp = 0; iitmp < inum; iitmp++) {
+    int jtmp = numneigh[ilist[iitmp]];
+    if (jtmp > max_jnum) max_jnum = jtmp;
   }
 
   // compute pace derivatives for each atom in group
   // use full neighbor list to count atoms less than cutoff
 
   const int* const mask = atom->mask;
-  const int ntypes = atom->ntypes;
+
+  acecimpl->ace->resize_neighbours_cache(max_jnum);
 
   for (int ii = 0; ii < inum; ii++) {
     int irow = 0;
@@ -291,7 +292,7 @@ void ComputePACE<PERATOM>::compute_array()
       const int typeoffset_global = nvalues*(itype-1);
 
       // run the ACE evaluator for atom i (shared kernel)
-      eval_atom(i, max_jnum, ntypes);
+      eval_atom(i);
       Array1D<DOUBLE_TYPE> Bs = acecimpl->ace->projections;
 
       if (dgradflag) {
@@ -485,11 +486,10 @@ void ComputePACE<PERATOM>::compute_peratom()
   const int* const ilist = list->ilist;
   const int* const numneigh = list->numneigh;
   const int* const mask = atom->mask;
-  const int ntypes = atom->ntypes;
 
   // determine the maximum number of neighbours
 
-  int max_jnum = -1;
+  int max_jnum = 0;
   for (int iitmp = 0; iitmp < inum; iitmp++) {
     int jtmp = numneigh[ilist[iitmp]];
     if (jtmp > max_jnum) max_jnum = jtmp;
@@ -497,10 +497,12 @@ void ComputePACE<PERATOM>::compute_peratom()
 
   // compute the ACE projections (descriptors) for each atom in the group
 
+  acecimpl->ace->resize_neighbours_cache(max_jnum);
+
   for (int ii = 0; ii < inum; ii++) {
     const int i = ilist[ii];
     if (mask[i] & groupbit) {
-      eval_atom(i, max_jnum, ntypes);
+      eval_atom(i);
       Array1D<DOUBLE_TYPE> Bs = acecimpl->ace->projections;
       for (int icoeff = 0; icoeff < size_peratom_cols; icoeff++)
         pace_atom[i][icoeff] = Bs(icoeff);

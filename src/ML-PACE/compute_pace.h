@@ -56,10 +56,10 @@ template <int PERATOM> class ComputePACE : public Compute {
   Compute *c_virial;
   std::string id_virial;
 
-  // shared per-atom ACE kernel: builds the evaluator for atom i and runs
-  // compute_atom, leaving projections (and, for PERATOM=0, neighbours_dB)
-  // available on acecimpl->ace.
-  void eval_atom(int i, int max_jnum, int ntypes);
+  // shared per-atom ACE kernel: runs compute_atom for atom i (the evaluator
+  // itself is built once in init()), leaving projections (and, for PERATOM=0,
+  // neighbours_dB) available on acecimpl->ace.
+  void eval_atom(int i);
   void dbdotr_compute();
   struct ACECimpl *acecimpl;
 };
