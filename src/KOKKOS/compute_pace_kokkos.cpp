@@ -332,6 +332,16 @@ void ComputePACEKokkos<DeviceType, PERATOM>::compute_array()
       for (int icoeff = 0; icoeff < this->size_peratom; icoeff++)
         this->pace_peratom[i][icoeff] = 0.0;
 
+    // GPU !dgradflag path: allocate and zero d_pace_peratom (Newton scatter accumulator).
+    // This replaces the per-chunk deep_copy(h_neighbours_dB) + host scatter.
+    const bool use_device_assembly = (!host_flag && !dgradflag);
+    if (use_device_assembly) {
+      if (d_pace_peratom.extent(0) < (size_t)this->nmax ||
+          d_pace_peratom.extent(1) < (size_t)this->size_peratom)
+        d_pace_peratom = t_ace_2d_lr("pace:d_pace_peratom", this->nmax, this->size_peratom);
+      Kokkos::deep_copy(d_pace_peratom, (KK_FLOAT)0.0);
+    }
+
     // device pipeline setup (neighbor list, atom data, maxneigh)
 
     setup_device_pipeline();
@@ -399,10 +409,18 @@ void ComputePACEKokkos<DeviceType, PERATOM>::compute_array()
       else
         Kokkos::parallel_for("pace:Projections",
           Kokkos::RangePolicy<DeviceType,TagComputePACEProjectionsFlat>(0,chunk_size*idx_ms_combs_max), *this);
-      Kokkos::parallel_for("pace:RhoDB",
-        Kokkos::RangePolicy<DeviceType,TagComputePACERhoDB>(0,chunk_size), *this);
-      Kokkos::parallel_for("pace:WeightsDB",
-        Kokkos::RangePolicy<DeviceType,TagComputePACEWeightsDB>(0,chunk_size), *this);
+      if (host_flag)
+        Kokkos::parallel_for("pace:RhoDB",
+          Kokkos::RangePolicy<DeviceType,TagComputePACERhoDB>(0,chunk_size), *this);
+      else
+        Kokkos::parallel_for("pace:RhoDB",
+          Kokkos::RangePolicy<DeviceType,TagComputePACERhoDBFlat>(0,chunk_size*idx_ms_combs_max), *this);
+      if (host_flag)
+        Kokkos::parallel_for("pace:WeightsDB",
+          Kokkos::RangePolicy<DeviceType,TagComputePACEWeightsDB>(0,chunk_size), *this);
+      else
+        Kokkos::parallel_for("pace:WeightsDB",
+          Kokkos::RangePolicy<DeviceType,TagComputePACEWeightsDBFlat>(0,chunk_size*idx_ms_combs_max), *this);
       if (host_flag)
         Kokkos::parallel_for("pace:DerivativeDB",
           Kokkos::RangePolicy<DeviceType,TagComputePACEDerivativeDB>(0,chunk_size), *this);
@@ -414,10 +432,24 @@ void ComputePACEKokkos<DeviceType, PERATOM>::compute_array()
           Kokkos::TeamPolicy<DeviceType,TagComputePACEDerivativeDB>(league,team_size,vector_length), *this);
       }
 
+      // GPU !dgradflag: scatter d_neighbours_dB into d_pace_peratom on device, avoiding
+      // the 44 MB/chunk deep_copy(h_neighbours_dB) + host Newton scatter.
+      if (use_device_assembly) {
+        int team_size = 32, vector_length = 1;
+        const int league = ((chunk_size+team_size-1)/team_size)*maxneigh;
+        check_team_size_for<TagComputePACEAssembleForce>(league, team_size, vector_length);
+        Kokkos::parallel_for("pace:AssembleForce",
+          Kokkos::TeamPolicy<DeviceType,TagComputePACEAssembleForce>(league,team_size,vector_length), *this);
+      }
+
       Kokkos::deep_copy(h_projections, d_projections);
-      Kokkos::deep_copy(h_neighbours_dB, d_neighbours_dB);
-      Kokkos::deep_copy(h_nearest, d_nearest);
-      Kokkos::deep_copy(h_ncount, d_ncount);
+      // h_neighbours_dB, h_nearest, h_ncount are only needed for the host scatter path
+      // (CPU/OMP backends or dgradflag=1 on GPU). Skip the 44MB deep_copy otherwise.
+      if (!use_device_assembly) {
+        Kokkos::deep_copy(h_neighbours_dB, d_neighbours_dB);
+        Kokkos::deep_copy(h_nearest, d_nearest);
+        Kokkos::deep_copy(h_ncount, d_ncount);
+      }
 
       // host-side global-array assembly for this chunk (mirrors compute_pace.cpp)
 
@@ -429,54 +461,58 @@ void ComputePACEKokkos<DeviceType, PERATOM>::compute_array()
         const int typeoffset_local = ndims_peratom * nvalues * (itype - 1);
         const int typeoffset_global = nvalues * (itype - 1);
         const int irow = bikflag ? (tag[i] - 1) : 0;
-        const int ncount = h_ncount(ii);
 
-        if (dgradflag) {
-          // dBi/dRi and dBi/dRj index tags
-          const int ti = tag[i] - 1;
-          for (int d = 0; d < 3; d++) {
-            this->pace[bik_rows + (ti*3*natoms) + 3*ti + d][0] = ti;
-            this->pace[bik_rows + (ti*3*natoms) + 3*ti + d][1] = ti;
-            this->pace[bik_rows + (ti*3*natoms) + 3*ti + d][2] = d;
-          }
-          for (int j = 0; j < natoms; j++)
-            for (int d = 0; d < 3; d++) {
-              this->pace[bik_rows + (j*3*natoms) + 3*ti + d][0] = ti;
-              this->pace[bik_rows + (j*3*natoms) + 3*ti + d][1] = j;
-              this->pace[bik_rows + (j*3*natoms) + 3*ti + d][2] = d;
-            }
-        }
+        // dB contributions: host path (CPU/OMP or dgradflag=1 on GPU)
+        // GPU !dgradflag path: handled by TagComputePACEAssembleForce kernel above
+        if (!use_device_assembly) {
+          const int ncount = h_ncount(ii);
 
-        // dB contributions over this atom's (within-cutoff) neighbours
-        for (int jj = 0; jj < ncount; jj++) {
-          const int j = h_nearest(ii, jj);
-          if (!dgradflag) {
-            double *pacedi = this->pace_peratom[i] + typeoffset_local;
-            double *pacedj = this->pace_peratom[j] + typeoffset_local;
-            for (int func = 0; func < nvalues; func++) {
-              const double fx_dB = h_neighbours_dB(ii, func, jj, 0);
-              const double fy_dB = h_neighbours_dB(ii, func, jj, 1);
-              const double fz_dB = h_neighbours_dB(ii, func, jj, 2);
-              pacedi[func] += fx_dB;
-              pacedi[func + yoffset] += fy_dB;
-              pacedi[func + zoffset] += fz_dB;
-              pacedj[func] -= fx_dB;
-              pacedj[func + yoffset] -= fy_dB;
-              pacedj[func + zoffset] -= fz_dB;
-            }
-          } else {
+          if (dgradflag) {
+            // dBi/dRi and dBi/dRj index tags
             const int ti = tag[i] - 1;
-            const int tj = tag[j] - 1;
-            for (int icoeff = 0; icoeff < nvalues; icoeff++) {
-              const double fx_dB = h_neighbours_dB(ii, icoeff, jj, 0);
-              const double fy_dB = h_neighbours_dB(ii, icoeff, jj, 1);
-              const double fz_dB = h_neighbours_dB(ii, icoeff, jj, 2);
-              this->pace[bik_rows + (tj*3*natoms) + 3*ti + 0][icoeff+3] -= fx_dB;
-              this->pace[bik_rows + (tj*3*natoms) + 3*ti + 1][icoeff+3] -= fy_dB;
-              this->pace[bik_rows + (tj*3*natoms) + 3*ti + 2][icoeff+3] -= fz_dB;
-              this->pace[bik_rows + (ti*3*natoms) + 3*ti + 0][icoeff+3] += fx_dB;
-              this->pace[bik_rows + (ti*3*natoms) + 3*ti + 1][icoeff+3] += fy_dB;
-              this->pace[bik_rows + (ti*3*natoms) + 3*ti + 2][icoeff+3] += fz_dB;
+            for (int d = 0; d < 3; d++) {
+              this->pace[bik_rows + (ti*3*natoms) + 3*ti + d][0] = ti;
+              this->pace[bik_rows + (ti*3*natoms) + 3*ti + d][1] = ti;
+              this->pace[bik_rows + (ti*3*natoms) + 3*ti + d][2] = d;
+            }
+            for (int j = 0; j < natoms; j++)
+              for (int d = 0; d < 3; d++) {
+                this->pace[bik_rows + (j*3*natoms) + 3*ti + d][0] = ti;
+                this->pace[bik_rows + (j*3*natoms) + 3*ti + d][1] = j;
+                this->pace[bik_rows + (j*3*natoms) + 3*ti + d][2] = d;
+              }
+          }
+
+          for (int jj = 0; jj < ncount; jj++) {
+            const int j = h_nearest(ii, jj);
+            if (!dgradflag) {
+              double *pacedi = this->pace_peratom[i] + typeoffset_local;
+              double *pacedj = this->pace_peratom[j] + typeoffset_local;
+              for (int func = 0; func < nvalues; func++) {
+                const double fx_dB = h_neighbours_dB(ii, func, jj, 0);
+                const double fy_dB = h_neighbours_dB(ii, func, jj, 1);
+                const double fz_dB = h_neighbours_dB(ii, func, jj, 2);
+                pacedi[func] += fx_dB;
+                pacedi[func + yoffset] += fy_dB;
+                pacedi[func + zoffset] += fz_dB;
+                pacedj[func] -= fx_dB;
+                pacedj[func + yoffset] -= fy_dB;
+                pacedj[func + zoffset] -= fz_dB;
+              }
+            } else {
+              const int ti = tag[i] - 1;
+              const int tj = tag[j] - 1;
+              for (int icoeff = 0; icoeff < nvalues; icoeff++) {
+                const double fx_dB = h_neighbours_dB(ii, icoeff, jj, 0);
+                const double fy_dB = h_neighbours_dB(ii, icoeff, jj, 1);
+                const double fz_dB = h_neighbours_dB(ii, icoeff, jj, 2);
+                this->pace[bik_rows + (tj*3*natoms) + 3*ti + 0][icoeff+3] -= fx_dB;
+                this->pace[bik_rows + (tj*3*natoms) + 3*ti + 1][icoeff+3] -= fy_dB;
+                this->pace[bik_rows + (tj*3*natoms) + 3*ti + 2][icoeff+3] -= fz_dB;
+                this->pace[bik_rows + (ti*3*natoms) + 3*ti + 0][icoeff+3] += fx_dB;
+                this->pace[bik_rows + (ti*3*natoms) + 3*ti + 1][icoeff+3] += fy_dB;
+                this->pace[bik_rows + (ti*3*natoms) + 3*ti + 2][icoeff+3] += fz_dB;
+              }
             }
           }
         }
@@ -491,6 +527,16 @@ void ComputePACEKokkos<DeviceType, PERATOM>::compute_array()
     }
 
     this->copymode = 0;
+
+    // GPU !dgradflag: copy d_pace_peratom back to pace_peratom for the force-row assembly.
+    // d_pace_peratom holds the Newton-scattered dB contributions from all chunks.
+    if (use_device_assembly) {
+      auto h_pace_peratom = Kokkos::create_mirror_view(d_pace_peratom);
+      Kokkos::deep_copy(h_pace_peratom, d_pace_peratom);
+      for (int i = 0; i < ntotal; i++)
+        for (int icoeff = 0; icoeff < this->size_peratom; icoeff++)
+          this->pace_peratom[i][icoeff] = h_pace_peratom(i, icoeff);
+    }
 
     // accumulate force contributions to global array (forces rows), !dgradflag
 
@@ -1124,6 +1170,48 @@ void ComputePACEKokkos<DeviceType, PERATOM>::operator()(TagComputePACERhoDB, con
 }
 
 /* ----------------------------------------------------------------------
+   RhoDBFlat: GPU flat decomposition of RhoDB over (idx_ms_combs, ii) pairs.
+   Writes to A_list / A_forward_prod / dB_flatten are disjoint per (ii,
+   idx_ms_combs) — no atomics required.
+------------------------------------------------------------------------- */
+
+template<class DeviceType, int PERATOM>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void ComputePACEKokkos<DeviceType, PERATOM>::operator()(TagComputePACERhoDBFlat, const int& iter) const
+{
+  const int idx_ms_combs = iter / chunk_size;
+  const int ii = iter % chunk_size;
+  const int i = d_ilist[ii + chunk_offset];
+  const int mu_i = d_map(type(i));
+  if (idx_ms_combs >= d_idx_ms_combs_count(mu_i)) return;
+
+  const int idx_func = d_idx_funcs(mu_i, idx_ms_combs);
+  const int rank = d_rank(mu_i, idx_func);
+  if (rank == 1) return;
+  const int r = rank - 1;
+
+  A_forward_prod(ii, idx_ms_combs, 0) = complex::one();
+  for (int t = 0; t < rank; t++) {
+    const int mu = d_mus(mu_i, idx_func, t);
+    const int n = d_ns(mu_i, idx_func, t);
+    const int l = d_ls(mu_i, idx_func, t);
+    const int m = d_ms_combs(mu_i, idx_ms_combs, t);
+    const int idx = l * (l + 1) + m;
+    A_list(ii, idx_ms_combs, t) = A(ii, mu, idx, n - 1);
+    A_forward_prod(ii, idx_ms_combs, t + 1) = A_forward_prod(ii, idx_ms_combs, t) * A_list(ii, idx_ms_combs, t);
+  }
+
+  complex A_backward_prod = complex::one();
+  for (int t = r; t >= 1; t--) {
+    const complex dB = A_forward_prod(ii, idx_ms_combs, t) * A_backward_prod;
+    dB_flatten(ii, idx_ms_combs, t) = dB;
+    A_backward_prod = A_backward_prod * A_list(ii, idx_ms_combs, t);
+  }
+  dB_flatten(ii, idx_ms_combs, 0) = A_forward_prod(ii, idx_ms_combs, 0) * A_backward_prod;
+}
+
+/* ----------------------------------------------------------------------
    WeightsDB: per-function adjoint weights for the descriptor gradients.
    Unlike the pair-style energy weights (which fold dF_drho and sum over all
    functions), these keep the function index separate and use theta_dB =
@@ -1172,6 +1260,121 @@ void ComputePACEKokkos<DeviceType, PERATOM>::operator()(TagComputePACEWeightsDB,
         weights_dB(ii, func_local, mu_t, idxm_sph, n_t - 1).im += valuem.im;
       }
     }
+  }
+}
+
+/* ----------------------------------------------------------------------
+   weights_one: shared per-ms-comb body for the WeightsDB flat GPU path.
+   UseAtomic=true (GPU): atomic_add into weights_dB .re/.im.
+   UseAtomic=false: direct += (not called from CPU — CPU keeps its inline body).
+------------------------------------------------------------------------- */
+
+template<class DeviceType, int PERATOM>
+template<bool UseAtomic>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void ComputePACEKokkos<DeviceType, PERATOM>::weights_one(int ii, int mu_i, int tbs_r1, int idx_ms_combs) const
+{
+  const int idx_func = d_idx_funcs(mu_i, idx_ms_combs);
+  const int rank = d_rank(mu_i, idx_func);
+  if (rank == 1) return;
+  const int func_local = idx_func - tbs_r1;
+
+  const KK_FLOAT theta_dB = d_ctildes(mu_i, idx_ms_combs, 0) * 0.5;
+
+  for (int t = 0; t < rank; t++) {
+    const int m_t = d_ms_combs(mu_i, idx_ms_combs, t);
+    const int factor = (m_t % 2 == 0 ? 1 : -1);
+    const complex dB = dB_flatten(ii, idx_ms_combs, t);
+    const int mu_t = d_mus(mu_i, idx_func, t);
+    const int n_t = d_ns(mu_i, idx_func, t);
+    const int l_t = d_ls(mu_i, idx_func, t);
+
+    const int idx = l_t * (l_t + 1) + m_t;
+    const int idx_sph = d_idx_sph(idx);
+    if (idx_sph >= 0) {
+      const complex value = theta_dB * dB;
+      if constexpr (UseAtomic) {
+        Kokkos::atomic_add(&weights_dB(ii, func_local, mu_t, idx_sph, n_t - 1).re, value.re);
+        Kokkos::atomic_add(&weights_dB(ii, func_local, mu_t, idx_sph, n_t - 1).im, value.im);
+      } else {
+        weights_dB(ii, func_local, mu_t, idx_sph, n_t - 1).re += value.re;
+        weights_dB(ii, func_local, mu_t, idx_sph, n_t - 1).im += value.im;
+      }
+    }
+    const int idxm = l_t * (l_t + 1) - m_t;
+    const int idxm_sph = d_idx_sph(idxm);
+    if (idxm_sph >= 0) {
+      const complex valuem = theta_dB * dB.conj() * (KK_FLOAT)factor;
+      if constexpr (UseAtomic) {
+        Kokkos::atomic_add(&weights_dB(ii, func_local, mu_t, idxm_sph, n_t - 1).re, valuem.re);
+        Kokkos::atomic_add(&weights_dB(ii, func_local, mu_t, idxm_sph, n_t - 1).im, valuem.im);
+      } else {
+        weights_dB(ii, func_local, mu_t, idxm_sph, n_t - 1).re += valuem.re;
+        weights_dB(ii, func_local, mu_t, idxm_sph, n_t - 1).im += valuem.im;
+      }
+    }
+  }
+}
+
+/* ----------------------------------------------------------------------
+   WeightsDBFlat: GPU flat decomposition over (idx_ms_combs, ii) pairs.
+   Writes to weights_dB share (ii, func_local, mu_t, idx_sph, n_t-1)
+   slots across idx_ms_combs -> atomic_add required.
+------------------------------------------------------------------------- */
+
+template<class DeviceType, int PERATOM>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void ComputePACEKokkos<DeviceType, PERATOM>::operator()(TagComputePACEWeightsDBFlat, const int& iter) const
+{
+  const int idx_ms_combs = iter / chunk_size;
+  const int ii = iter % chunk_size;
+  const int i = d_ilist[ii + chunk_offset];
+  const int mu_i = d_map(type(i));
+  if (idx_ms_combs >= d_idx_ms_combs_count(mu_i)) return;
+  const int tbs_r1 = d_tbs_r1(mu_i);
+  weights_one<true>(ii, mu_i, tbs_r1, idx_ms_combs);
+}
+
+/* ----------------------------------------------------------------------
+   AssembleForce: GPU-only Newton scatter of d_neighbours_dB into
+   d_pace_peratom. Replaces the per-chunk deep_copy(h_neighbours_dB) + host
+   scatter for the !dgradflag path. Same (atom,neighbour) TeamPolicy as
+   DerivativeDB. Writes are NOT disjoint (j is shared) -> atomic_add required.
+------------------------------------------------------------------------- */
+
+template<class DeviceType, int PERATOM>
+// NOLINTNEXTLINE
+KOKKOS_INLINE_FUNCTION
+void ComputePACEKokkos<DeviceType, PERATOM>::operator()(
+    TagComputePACEAssembleForce,
+    const typename Kokkos::TeamPolicy<DeviceType,TagComputePACEAssembleForce>::member_type& team) const
+{
+  const int atoms_per_team = (chunk_size + team.team_size() - 1) / team.team_size();
+  const int ii = team.team_rank() + team.team_size() * (team.league_rank() % atoms_per_team);
+  const int jj = team.league_rank() / atoms_per_team;
+  if (ii >= chunk_size) return;
+  if (jj >= d_ncount(ii)) return;
+
+  const int i = d_ilist[ii + chunk_offset];
+  if (!(mask(i) & this->groupbit)) return;
+
+  const int j = d_nearest(ii, jj);
+  const int itype = type(i) - 1;
+  const int typeoffset = this->ndims_peratom * this->nvalues * itype;
+  const int nv = this->nvalues;
+
+  for (int func = 0; func < nv; func++) {
+    const KK_FLOAT dx = d_neighbours_dB(ii, func, jj, 0);
+    const KK_FLOAT dy = d_neighbours_dB(ii, func, jj, 1);
+    const KK_FLOAT dz = d_neighbours_dB(ii, func, jj, 2);
+    Kokkos::atomic_add(&d_pace_peratom(i, typeoffset + func),        dx);
+    Kokkos::atomic_add(&d_pace_peratom(i, typeoffset + func + nv),   dy);
+    Kokkos::atomic_add(&d_pace_peratom(i, typeoffset + func + 2*nv), dz);
+    Kokkos::atomic_add(&d_pace_peratom(j, typeoffset + func),        -dx);
+    Kokkos::atomic_add(&d_pace_peratom(j, typeoffset + func + nv),   -dy);
+    Kokkos::atomic_add(&d_pace_peratom(j, typeoffset + func + 2*nv), -dz);
   }
 }
 

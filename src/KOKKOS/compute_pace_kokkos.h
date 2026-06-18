@@ -66,9 +66,13 @@ class ComputePACEKokkos : public ComputePACE<PERATOM> {
   struct TagComputePACECopyProjections{};
   struct TagComputePACEAiFused{};         // GPU: fused Radial+Ai for PERATOM=1 (no global fr/gr)
   // B-gradient pipeline (PERATOM=0 only): neighbours_dB = dB_{i,nu}/dr_j
-  struct TagComputePACERhoDB{};
-  struct TagComputePACEWeightsDB{};
+  struct TagComputePACERhoDB{};           // CPU: RangePolicy(chunk_size), x=ii
+  struct TagComputePACERhoDBFlat{};       // GPU: RangePolicy(chunk_size*idx_ms_combs_max), no atomics
+  struct TagComputePACEWeightsDB{};        // CPU: RangePolicy(chunk_size), x=ii, no atomics
+  struct TagComputePACEWeightsDBFlat{};   // GPU: RangePolicy(chunk_size*idx_ms_combs_max), atomics
   struct TagComputePACEDerivativeDB{};
+  // GPU !dgradflag force-gradient Newton scatter (eliminates deep_copy(h_neighbours_dB))
+  struct TagComputePACEAssembleForce{};   // GPU: TeamPolicy(atoms x neigh), atomics into d_pace_peratom
 
   ComputePACEKokkos(class LAMMPS *, int, char **);
   ~ComputePACEKokkos() override;
@@ -114,10 +118,16 @@ class ComputePACEKokkos : public ComputePACE<PERATOM> {
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
   void operator()(TagComputePACERhoDB, const int&) const;
+// NOLINTNEXTLINE
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagComputePACERhoDBFlat, const int&) const;
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
   void operator()(TagComputePACEWeightsDB, const int&) const;
+// NOLINTNEXTLINE
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagComputePACEWeightsDBFlat, const int&) const;
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
@@ -125,6 +135,10 @@ class ComputePACEKokkos : public ComputePACE<PERATOM> {
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
   void operator()(TagComputePACEDerivativeDB, const typename Kokkos::TeamPolicy<DeviceType,TagComputePACEDerivativeDB>::member_type&) const; // GPU path
+
+// NOLINTNEXTLINE
+  KOKKOS_INLINE_FUNCTION
+  void operator()(TagComputePACEAssembleForce, const typename Kokkos::TeamPolicy<DeviceType,TagComputePACEAssembleForce>::member_type&) const; // GPU: Newton scatter into d_pace_peratom
 
 // NOLINTNEXTLINE
   KOKKOS_INLINE_FUNCTION
@@ -187,6 +201,10 @@ class ComputePACEKokkos : public ComputePACE<PERATOM> {
   t_ace_3c dB_flatten;                 // (chunk, idx_ms_combs, rank): leave-one-out products
   t_ace_5c weights_dB;                 // (chunk, func_rankgt1, mu, idx_sph, nradmax+1)
   t_ace_4d d_neighbours_dB;            // (chunk, nvalues, maxneigh, 3): dB_{i,nu}/dr_j
+
+  // GPU-only Newton scatter accumulator (nmax, size_peratom): replaces h_neighbours_dB
+  // deep_copy + host scatter for the !dgradflag path. LayoutRight matches pace_peratom.
+  t_ace_2d_lr d_pace_peratom;
 
   // ---- radial functions (per chunk) ----
   // fr/gr: read by Ai; allocated for both PERATOM values.
@@ -282,6 +300,13 @@ class ComputePACEKokkos : public ComputePACE<PERATOM> {
   template<bool UseAtomic>
   KOKKOS_INLINE_FUNCTION
   void project_one(int ii, int mu_i, int idx_ms_combs) const;
+
+  // Shared single-ms-comb kernel body for WeightsDB flat GPU decomposition.
+  // UseAtomic=true (GPU): atomic_add into weights_dB (multiple idx_ms_combs can share
+  // the same (ii, func_local, mu_t, idx_sph, n_t-1) slot). CPU keeps its inline body.
+  template<bool UseAtomic>
+  KOKKOS_INLINE_FUNCTION
+  void weights_one(int ii, int mu_i, int tbs_r1, int idx_ms_combs) const;
 
   // Shared single-neighbour body for PERATOM=0 descriptor-gradient computation.
   // Writes to d_neighbours_dB(ii,...,jj,...) are disjoint per (ii,jj) so no atomics
