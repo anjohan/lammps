@@ -1,37 +1,60 @@
 .. index:: compute pace
+.. index:: compute pace/kk
+.. index:: compute pace/atom
+.. index:: compute pace/atom/kk
 
 compute pace command
 ========================
+
+Accelerator Variants: *pace/kk*
+
+compute pace/atom command
+=========================
+
+Accelerator Variants: *pace/atom/kk*
 
 Syntax
 """"""
 
 .. code-block:: LAMMPS
 
-   compute ID group-ID pace ace_potential_filename ... keyword values ...
+   compute ID group-ID pace ace_potential_filename bikflag dgradflag keyword values ...
+   compute ID group-ID pace/atom ace_potential_filename keyword values ...
 
 * ID, group-ID are documented in :doc:`compute <compute>` command
-* pace = style name of this compute command
+* pace or pace/atom = style name of this compute command
 * ace_potential_filename = file name (in the .yace or .ace format from :doc:`pace pair_style <pair_pace>`) including ACE hyper-parameters, bonds, and generalized coupling coefficients
-* keyword = *bikflag* or *dgradflag*
+* bikflag = *0* or *1* (style *pace* only)
 
   .. parsed-literal::
 
-       *bikflag* value = *0* or *1*
-          *0* = descriptors are summed over atoms of each type
-          *1* = descriptors are listed separately for each atom
-       *dgradflag* value = *0* or *1*
-          *0* = descriptor gradients are summed over atoms of each type
-          *1* = descriptor gradients are listed separately for each atom pair
+       *0* = descriptors are summed over atoms of each type
+       *1* = descriptors are listed separately for each atom
+
+* dgradflag = *0* or *1* (style *pace* only)
+
+  .. parsed-literal::
+
+       *0* = descriptor gradients are summed over atoms of each type
+       *1* = descriptor gradients are listed separately for each atom pair
+
+* zero or more keyword/value pairs may be appended
+* keyword = *chunksize*
+
+  .. parsed-literal::
+
+       *chunksize* value = number of atoms in each pass (Kokkos accelerator variants only)
 
 Examples
 """"""""
 
 .. code-block:: LAMMPS
 
-   compute pace all pace coupling_coefficients.yace
-   compute pace all pace coupling_coefficients.yace 0 1
-   compute pace all pace coupling_coefficients.yace 1 1
+   compute pace all pace coupling_coefficients.yace 0 0
+   compute pace all pace coupling_coefficients.yace 1 0
+   compute pace all pace coupling_coefficients.yace 1 1 chunksize 512
+   compute bik all pace/atom coupling_coefficients.yace
+   compute bik all pace/atom coupling_coefficients.yace chunksize 8192
 
 Description
 """""""""""
@@ -97,6 +120,20 @@ be modeled after the potential files in :doc:`pace pair_style <pair_pace>`,
 and have the same format. Details on how to generate the coefficient files
 to train ACE models may be found in `FitSNAP <https://github.com/FitSNAP/FitSNAP>`_.
 
+.. versionadded:: TBD
+
+Style *pace/atom* computes only the per-atom ACE descriptors
+:math:`B_{i,\boldsymbol{\nu}}` and exposes them as a per-atom array with one
+row per atom and one column per descriptor, analogous to :doc:`compute
+sna/atom <compute_sna_atom>`.  The values are identical to the per-atom
+descriptor rows of the global array produced by style *pace* with *bikflag* =
+1, but as per-atom data they can be written out with a :doc:`dump custom
+<dump>` command, time-averaged with :doc:`fix ave/atom <fix_ave_atom>`, or
+processed by :doc:`compute reduce <compute_reduce>`.  Rows of atoms outside
+the compute group are set to zero.  Style *pace/atom* takes no *bikflag* or
+*dgradflag* arguments and computes no descriptor gradients, energies, or
+virials.
+
 The keyword *bikflag* determines whether or not to list the descriptors of
 each atom separately, or sum them together and list in a single row. If
 *bikflag* is set to *0* then a single descriptor row is used, which contains
@@ -106,9 +143,9 @@ atoms *i* to produce :math:`B_{\boldsymbol{\nu}}`. If *bikflag* is set to
 In this case, the entries in the final column for these rows are set to zero.
 
 The keyword *dgradflag* determines whether to sum atom gradients or list
-them separately. If *dgradflag* is set to 0, the ACE
-descriptor gradients w.r.t. atom *j* are summed over all atoms *i'*
-of, which may be useful when training linear ACE models on atomic forces.
+them separately. If *dgradflag* is set to 0, the ACE descriptor gradients
+with respect to atom *j* are summed over all atoms *i*, which may be useful
+when training linear ACE models on atomic forces.
 If *dgradflag* is set to 1, gradients are listed separately for each pair of atoms.
 Each row corresponds
 to a single term :math:`\frac{\partial {B_{i,\boldsymbol{\nu}}}}{\partial {r}^a_j}`
@@ -117,6 +154,19 @@ index *j*. This also changes the number of columns to be equal to the number of
 ACE descriptors, with 3 additional columns representing the indices :math:`i`,
 :math:`j`, and :math:`a`, as explained more in the Output info section below.
 The option *dgradflag=1* requires that *bikflag=1*.
+
+.. versionadded:: TBD
+
+The keyword *chunksize* is only applicable when using the Kokkos accelerator
+variants of these styles (*pace/kk*, *pace/atom/kk*); the plain styles accept
+and ignore it, so the same input script runs with and without the
+:doc:`-suffix command-line switch <Run_options>`.  It controls the number of
+atoms processed in each pass of the device descriptor calculation, bounding
+the size of the per-chunk scratch arrays.  For example, if there are 8192
+atoms on a GPU and *chunksize* is set to 4096, the calculation is broken into
+two passes.  Larger chunks amortize kernel launch overhead at the cost of
+device memory; style *pace* uses a smaller default than *pace/atom* because
+its descriptor-gradient scratch arrays are much larger per atom.
 
 .. note::
 
@@ -150,7 +200,7 @@ The option *dgradflag=1* requires that *bikflag=1*.
    atoms in the same bond, angle, or dihedral.  This is the default
    setting for the :doc:`special_bonds <special_bonds>` command, and
    means those pairwise interactions do not appear in the neighbor list.
-   Because this fix uses the neighbor list, it also means those pairs
+   Because this compute uses the neighbor list, it also means those pairs
    will not be included in the calculation.  One way to get around this,
    is to write a dump file, and use the :doc:`rerun <rerun>` command to
    compute the ACE descriptors for snapshots in the dump file.
@@ -173,10 +223,9 @@ appear in the following order:
 * 3\*\ *n* force rows: quantities, with derivatives w.r.t. x, y, and z coordinate of atom *i* appearing in consecutive rows. The atoms are sorted based on atom ID and run up to the total number of atoms, *n*.
 * 6 rows: *virial* quantities summed for all atoms of type *I*
 
-For example, if :math:`\# \; B_{i, \boldsymbol{\nu}}` =30 and ntypes=1, the number of columns in the
-The number of columns in the global array generated by *pace* are 31, and
-931, respectively, while the number of rows is 1+3\*\ *n*\ +6, where *n*
-is the total number of atoms.
+For example, if :math:`\# \; B_{i, \boldsymbol{\nu}}` =30 and ntypes=1, the
+number of columns in the global array generated by *pace* is 31, while the
+number of rows is 1+3\*\ *n*\ +6, where *n* is the total number of atoms.
 
 If the *bik* keyword is set to 1, the structure of the pace array is expanded.
 The first :math:`N` rows of the pace array
@@ -214,9 +263,23 @@ The first column of the last row, after the first
 energy. The virial components are not used with this option. The total number of
 rows is therefore :math:`N + 3N^2 + 1` and the number of columns is :math:`K + 3`.
 
-These values can be accessed by any command that uses global values
-from a compute as input.  See the :doc:`Howto output <Howto_output>` doc
-page for an overview of LAMMPS output options.
+Compute *pace/atom* instead evaluates a per-atom array.  The number of
+columns is equal to the number of ACE descriptors; each row contains the
+descriptors :math:`B_{i,\boldsymbol{\nu}}` of one atom, in the same
+descriptor order as the columns of one type block of the *pace* global
+array.  Rows of atoms outside the compute group are zero.
+
+The global array values of *pace* can be accessed by any command that uses
+global values from a compute as input, and the per-atom array of *pace/atom*
+by any command that uses per-atom values from a compute as input.  See the
+:doc:`Howto output <Howto_output>` doc page for an overview of LAMMPS output
+options.
+
+----------
+
+.. include:: accel_styles.rst
+
+----------
 
 Restrictions
 """"""""""""
@@ -224,6 +287,16 @@ Restrictions
 These computes are part of the ML-PACE package.  They are only enabled
 if LAMMPS was built with that package.  See the :doc:`Build package
 <Build_package>` page for more info.
+
+The global array of style *pace* is sized using the number of atoms present
+when the compute is defined.  Define the compute after all atoms have been
+created, and do not add or remove atoms afterwards.
+
+The Kokkos accelerator variants support only the spline-based radial
+functions and the *FinnisSinclair* / *FinnisSinclairShiftedScaled* embedding
+forms of standard *.yace* potential files, and do not support a ZBL core
+repulsion inner cutoff.  Unsupported potential files produce an error, in
+which case the plain CPU styles can be used instead.
 
 Related commands
 """"""""""""""""
@@ -235,8 +308,8 @@ Related commands
 Default
 """""""
 
-The optional keyword defaults are *bikflag* = 0,
-*dgradflag* = 0
+The keyword default is *chunksize* = 4096 for *pace/atom/kk* and 256 for
+*pace/kk*.
 
 ----------
 

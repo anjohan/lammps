@@ -11,9 +11,8 @@
 ------------------------------------------------------------------------- */
 
 #include "compute_pace.h"
+#include "compute_pace_impl.h"
 
-#include "ace-evaluator/ace_c_basis.h"
-#include "ace-evaluator/ace_evaluator.h"
 #include "ace-evaluator/ace_types.h"
 
 #include "atom.h"
@@ -27,18 +26,7 @@
 #include "pair.h"
 #include "update.h"
 
-namespace LAMMPS_NS {
-struct ACECimpl {
-  ACECimpl() : basis_set(nullptr), ace(nullptr) {}
-  ~ACECimpl()
-  {
-    delete basis_set;
-    delete ace;
-  }
-  ACECTildeBasisSet *basis_set;
-  ACECTildeEvaluator *ace;
-};
-}    // namespace LAMMPS_NS
+#include <cstring>
 
 using namespace LAMMPS_NS;
 
@@ -46,14 +34,13 @@ using namespace LAMMPS_NS;
 
 template<int PERATOM>
 ComputePACE<PERATOM>::ComputePACE(LAMMPS *lmp, int narg, char **arg) :
-    Compute(lmp, narg, arg), cutsq(nullptr), list(nullptr), pace(nullptr), paceall(nullptr),
-    pace_peratom(nullptr), pace_atom(nullptr), map(nullptr), c_pe(nullptr), c_virial(nullptr),
+    Compute(lmp, narg, arg), list(nullptr), pace(nullptr), paceall(nullptr),
+    pace_peratom(nullptr), pace_atom(nullptr), c_pe(nullptr), c_virial(nullptr),
     acecimpl(nullptr)
 {
   bikflag = 0;
   dgradflag = 0;
-
-  int ntypes = atom->ntypes;
+  chunksize_arg = 0;
 
   acecimpl = new ACECimpl;
 
@@ -64,13 +51,32 @@ ComputePACE<PERATOM>::ComputePACE(LAMMPS *lmp, int narg, char **arg) :
   if constexpr (!PERATOM) {
     bikflag = utils::inumeric(FLERR, arg[4], false, lmp);
     dgradflag = utils::inumeric(FLERR, arg[5], false, lmp);
+    if (bikflag != 0 && bikflag != 1)
+      error->all(FLERR, "Compute {} bikflag must be 0 or 1", style);
+    if (dgradflag != 0 && dgradflag != 1)
+      error->all(FLERR, "Compute {} dgradflag must be 0 or 1", style);
     if (dgradflag && !bikflag)
-      error->all(FLERR, "Illegal compute pace command: dgradflag=1 requires bikflag=1");
+      error->all(FLERR, "Illegal compute {} command: dgradflag=1 requires bikflag=1", style);
   }
 
-  memory->create(map,ntypes+1,"pace:map");
+  // optional trailing keywords. "chunksize N" tunes the Kokkos styles' device
+  // chunking; it is validated here (and ignored by the plain CPU styles) so the
+  // same script runs with and without -sf kk. Anything else is an error.
+  int iarg = nargmin;
+  while (iarg < narg) {
+    if (strcmp(arg[iarg], "chunksize") == 0) {
+      if (iarg + 1 >= narg)
+        error->all(FLERR, "compute {}: chunksize keyword needs a value", style);
+      chunksize_arg = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      if (chunksize_arg <= 0)
+        error->all(FLERR, "compute {}: chunksize must be positive", style);
+      iarg += 2;
+    } else {
+      error->all(FLERR, "Unknown compute {} keyword: {}", style, arg[iarg]);
+    }
+  }
 
-  //read in file with CG coefficients or c_tilde coefficients
+  // read the .yace potential file — stores pre-merged c-tilde (coupling × fit coefficients)
 
   auto potential_file_name = utils::get_potential_file_path(arg[3]);
   delete acecimpl->basis_set;
@@ -82,12 +88,21 @@ ComputePACE<PERATOM>::ComputePACE(LAMMPS *lmp, int narg, char **arg) :
   int n_r1 = acecimpl->basis_set->total_basis_size_rank1[0];
   int n_rp = acecimpl->basis_set->total_basis_size[0];
   nvalues = n_r1 + n_rp;
+  for (int mu = 1; mu < (int)acecimpl->basis_set->nelements; mu++) {
+    if (acecimpl->basis_set->total_basis_size_rank1[mu] != n_r1 ||
+        acecimpl->basis_set->total_basis_size[mu] != n_rp)
+      error->all(FLERR, "compute pace: per-element basis sizes differ; only equal-size potentials are supported");
+  }
 
   ndims_force = 3;
   ndims_virial = 6;
   bik_rows = 1;
   yoffset = nvalues;
   zoffset = 2*nvalues;
+  // the global array is indexed by (a small multiple of) the global atom id,
+  // so the id arithmetic below must fit in the int natoms member
+  if (!PERATOM && atom->natoms > MAXSMALLINT)
+    error->all(FLERR, "Compute {} does not support more than 2^31 atoms", style);
   natoms = atom->natoms;
 
   ndims_peratom = ndims_force;
@@ -137,10 +152,8 @@ ComputePACE<PERATOM>::~ComputePACE()
   delete acecimpl;
   memory->destroy(pace);
   memory->destroy(paceall);
-  memory->destroy(cutsq);
   memory->destroy(pace_peratom);
   memory->destroy(pace_atom);
-  memory->destroy(map);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -148,6 +161,13 @@ ComputePACE<PERATOM>::~ComputePACE()
 template<int PERATOM>
 void ComputePACE<PERATOM>::init()
 {
+  // the global array (rows indexed by global atom id) was sized from natoms at
+  // definition; a mismatch here would silently write outside the array
+  if constexpr (!PERATOM)
+    if (atom->natoms != natoms)
+      error->all(FLERR, "Compute {} was defined for {} atoms, but the system now has {};"
+                 " define the compute after all atoms are created", style, natoms, atom->natoms);
+
   if (force->pair == nullptr)
     error->all(FLERR,"Compute {} requires a pair style be defined", style);
 
@@ -167,11 +187,13 @@ void ComputePACE<PERATOM>::init()
   acecimpl->ace->compute_b_grad = !PERATOM;
 
   const int ntypes = atom->ntypes;
+  if (ntypes > (int) acecimpl->basis_set->nelements)
+    error->all(FLERR, "Compute {}: ntypes ({}) exceeds the number of elements "
+               "in the potential file ({})", style, ntypes,
+               (int) acecimpl->basis_set->nelements);
   acecimpl->ace->element_type_mapping.init(ntypes + 1);
-  for (int ik = 1; ik <= ntypes; ik++) {
-    map[ik] = ik - 1;
+  for (int ik = 1; ik <= ntypes; ik++)
     acecimpl->ace->element_type_mapping(ik) = ik - 1;
-  }
 
   if constexpr (!PERATOM) {
 
@@ -273,67 +295,56 @@ void ComputePACE<PERATOM>::compute_array()
     if (jtmp > max_jnum) max_jnum = jtmp;
   }
 
-  // compute pace derivatives for each atom in group
-  // use full neighbor list to count atoms less than cutoff
+  // evaluate B_{i,nu} (projections) and, for PERATOM=0, neighbours_dB = dB_{i,nu}/dr_j
 
   const int* const mask = atom->mask;
 
   acecimpl->ace->resize_neighbours_cache(max_jnum);
 
   for (int ii = 0; ii < inum; ii++) {
-    int irow = 0;
-    if (bikflag) irow = atom->tag[ilist[ii] & NEIGHMASK]-1;
     const int i = ilist[ii];
     if (mask[i] & groupbit) {
+      const int ti = static_cast<int>(atom->tag[i]) - 1;   // 0-based global id
+      const int irow = bikflag ? ti : 0;
       const int itype = type[i];
       const int* const jlist = firstneigh[i];
       const int jnum = numneigh[i];
       const int typeoffset_local = ndims_peratom*nvalues*(itype-1);
       const int typeoffset_global = nvalues*(itype-1);
 
-      // run the ACE evaluator for atom i (shared kernel)
+      // pace Alg. 1-2: fills projections = B_{i,nu} and (PERATOM=0) neighbours_dB
       eval_atom(i);
-      Array1D<DOUBLE_TYPE> Bs = acecimpl->ace->projections;
+      const auto &Bs = acecimpl->ace->projections;
 
       if (dgradflag) {
 
-        // dBi/dRi tags
+        // Row arithmetic below (bik_rows + tag*3*natoms + 3*tag + component) is int
+        // and overflows near natoms ~ 26K (3*natoms*natoms exceeds INT_MAX). Not
+        // guarded: size_array_rows is an int LAMMPS-wide, and the N^2 array is
+        // already impractically large well before that atom count is reached.
 
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 0][0] = atom->tag[i]-1;
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 0][1] = atom->tag[i]-1;
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 0][2] = 0;
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 1][0] = atom->tag[i]-1;
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 1][1] = atom->tag[i]-1;
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 1][2] = 1;
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 2][0] = atom->tag[i]-1;
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 2][1] = atom->tag[i]-1;
-        pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 2][2] = 2;
+        // dBi/dRi and dBi/dRj index tags
 
-        // dBi/dRj tags
-
-        for (int j=0; j<natoms; j++) {
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 0][0] = atom->tag[i]-1;
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 0][1] = j;
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 0][2] = 0;
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 1][0] = atom->tag[i]-1;
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 1][1] = j;
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 1][2] = 1;
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 2][0] = atom->tag[i]-1;
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 2][1] = j;
-          pace[bik_rows + (j*3*natoms) + 3*(atom->tag[i]-1) + 2][2] = 2;
+        for (int d = 0; d < 3; d++) {
+          pace[bik_rows + (ti*3*natoms) + 3*ti + d][0] = ti;
+          pace[bik_rows + (ti*3*natoms) + 3*ti + d][1] = ti;
+          pace[bik_rows + (ti*3*natoms) + 3*ti + d][2] = d;
         }
+        for (int j = 0; j < natoms; j++)
+          for (int d = 0; d < 3; d++) {
+            pace[bik_rows + (j*3*natoms) + 3*ti + d][0] = ti;
+            pace[bik_rows + (j*3*natoms) + 3*ti + d][1] = j;
+            pace[bik_rows + (j*3*natoms) + 3*ti + d][2] = d;
+          }
       }
 
       for (int jj = 0; jj < jnum; jj++) {
-        const int j = jlist[jj];
-        //replace mapping of jj to j
+        int j = jlist[jj];
+        j &= NEIGHMASK;
         if (!dgradflag) {
           double *pacedi = pace_peratom[i]+typeoffset_local;
           double *pacedj = pace_peratom[j]+typeoffset_local;
 
-          //force array in (func_ind,neighbour_ind,xyz_ind) format
-          // dimension: (n_descriptors,max_jnum,3)
-          //example to access entries for neighbour jj after running compute_atom for atom i:
           for (int func_ind =0; func_ind < nvalues; func_ind++){
             DOUBLE_TYPE fx_dB = acecimpl->ace->neighbours_dB(func_ind,jj,0);
             DOUBLE_TYPE fy_dB = acecimpl->ace->neighbours_dB(func_ind,jj,1);
@@ -346,6 +357,7 @@ void ComputePACE<PERATOM>::compute_array()
             pacedj[func_ind+zoffset] -= fz_dB;
             }
          } else {
+            const int tj = static_cast<int>(atom->tag[j]) - 1;
             for (int iicoeff = 0; iicoeff < nvalues; iicoeff++) {
 
               // add to pace array for this proc
@@ -353,14 +365,14 @@ void ComputePACE<PERATOM>::compute_array()
               DOUBLE_TYPE fx_dB = acecimpl->ace->neighbours_dB(iicoeff,jj,0);
               DOUBLE_TYPE fy_dB = acecimpl->ace->neighbours_dB(iicoeff,jj,1);
               DOUBLE_TYPE fz_dB = acecimpl->ace->neighbours_dB(iicoeff,jj,2);
-              pace[bik_rows + ((atom->tag[j]-1)*3*natoms) + 3*(atom->tag[i]-1) + 0][iicoeff+3] -= fx_dB;
-              pace[bik_rows + ((atom->tag[j]-1)*3*natoms) + 3*(atom->tag[i]-1) + 1][iicoeff+3] -= fy_dB;
-              pace[bik_rows + ((atom->tag[j]-1)*3*natoms) + 3*(atom->tag[i]-1) + 2][iicoeff+3] -= fz_dB;
+              pace[bik_rows + (tj*3*natoms) + 3*ti + 0][iicoeff+3] -= fx_dB;
+              pace[bik_rows + (tj*3*natoms) + 3*ti + 1][iicoeff+3] -= fy_dB;
+              pace[bik_rows + (tj*3*natoms) + 3*ti + 2][iicoeff+3] -= fz_dB;
 
               // dBi/dRi
-              pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 0][iicoeff+3] += fx_dB;
-              pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 1][iicoeff+3] += fy_dB;
-              pace[bik_rows + ((atom->tag[i]-1)*3*natoms) + 3*(atom->tag[i]-1) + 2][iicoeff+3] += fz_dB;
+              pace[bik_rows + (ti*3*natoms) + 3*ti + 0][iicoeff+3] += fx_dB;
+              pace[bik_rows + (ti*3*natoms) + 3*ti + 1][iicoeff+3] += fy_dB;
+              pace[bik_rows + (ti*3*natoms) + 3*ti + 2][iicoeff+3] += fz_dB;
             }
           }
         } // loop over jj inside
@@ -379,7 +391,7 @@ void ComputePACE<PERATOM>::compute_array()
       }
     } //group bit
   } // for ii loop
-  // accumulate force contributions to global array
+  // scatter per-atom dB/dr accumulations (pace_peratom) into the dB rows of the global array
   if (!dgradflag){
     for (int itype = 0; itype < atom->ntypes; itype++) {
       const int typeoffset_local = ndims_peratom*nvalues*itype;
@@ -487,6 +499,14 @@ void ComputePACE<PERATOM>::compute_peratom()
   const int* const numneigh = list->numneigh;
   const int* const mask = atom->mask;
 
+  // zero the output; rows of atoms outside the group stay zero, matching the
+  // Kokkos style (which zeroes the whole device array before its chunk loop)
+
+  const int ntotal = atom->nlocal + atom->nghost;
+  for (int i = 0; i < ntotal; i++)
+    for (int icoeff = 0; icoeff < size_peratom_cols; icoeff++)
+      pace_atom[i][icoeff] = 0.0;
+
   // determine the maximum number of neighbours
 
   int max_jnum = 0;
@@ -503,12 +523,9 @@ void ComputePACE<PERATOM>::compute_peratom()
     const int i = ilist[ii];
     if (mask[i] & groupbit) {
       eval_atom(i);
-      Array1D<DOUBLE_TYPE> Bs = acecimpl->ace->projections;
+      const auto &Bs = acecimpl->ace->projections;
       for (int icoeff = 0; icoeff < size_peratom_cols; icoeff++)
         pace_atom[i][icoeff] = Bs(icoeff);
-    } else {
-      for (int icoeff = 0; icoeff < size_peratom_cols; icoeff++)
-        pace_atom[i][icoeff] = 0.0;
     }
   }
 
@@ -529,8 +546,7 @@ void ComputePACE<PERATOM>::dbdotr_compute()
   double **x = atom->x;
   int irow0 = bik_rows+ndims_force*natoms;
 
-  // sum over ace contributions to forces
-  // on all particles including ghosts
+  // sum r_i * dB_{i,nu}/dr_i over all particles (local + ghost) to fill virial rows
 
   int nall = atom->nlocal + atom->nghost;
   for (int i = 0; i < nall; i++)
@@ -569,8 +585,6 @@ double ComputePACE<PERATOM>::memory_usage()
   } else {
     bytes += (double)nmaxatom*size_peratom_cols * sizeof(double);    // pace_atom
   }
-  int n = atom->ntypes+1;
-  bytes += (double)n*sizeof(int);        // map
 
   return bytes;
 }

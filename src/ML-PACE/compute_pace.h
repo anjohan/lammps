@@ -43,12 +43,13 @@ template <int PERATOM> class ComputePACE : public Compute {
   int natoms, nmax, nmaxatom, size_peratom, lastcol;
   int nvalues, yoffset, zoffset;
   int ndims_peratom, ndims_force, ndims_virial;
-  double **cutsq;
+  int chunksize_arg;    // optional "chunksize N" keyword; used by the Kokkos
+                        // subclass only, accepted-and-ignored here so the same
+                        // script runs with and without -sf kk (0 = not given)
   class NeighList *list;
   double **pace, **paceall;
   double **pace_peratom;
   double **pace_atom;    // per-atom descriptor array (array_atom), PERATOM=1
-  int *map;              // map types to [0,nelements)
   int bikflag, bik_rows, dgradflag, dgrad_rows;
   double cutmax;
 

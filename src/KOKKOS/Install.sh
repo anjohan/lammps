@@ -101,6 +101,8 @@ action compute_composition_atom_kokkos.cpp compute_composition_atom.cpp
 action compute_composition_atom_kokkos.h compute_composition_atom.h
 action compute_orientorder_atom_kokkos.cpp
 action compute_orientorder_atom_kokkos.h
+action compute_pace_kokkos.cpp compute_pace.cpp
+action compute_pace_kokkos.h compute_pace.h
 action compute_sna_grid_kokkos.cpp compute_sna_grid.cpp
 action compute_sna_grid_kokkos.h compute_sna_grid.h
 action compute_sna_grid_kokkos_impl.h compute_sna_grid.cpp

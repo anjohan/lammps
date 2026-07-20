@@ -1281,6 +1281,8 @@ fingerprintconstants
 fingerprintsperelement
 finitecutflag
 Finnis
+FinnisSinclair
+FinnisSinclairShiftedScaled
 Fiorin
 fitpod
 fivebody
