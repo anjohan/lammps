@@ -581,11 +581,22 @@ as broken in a simulation by removing them from the bond family
 
 A naive implementation would have us first loop over all bonds and
 compute :math:`s_{min}` in :ref:`(9) <peris0>`, then loop over all bonds
-again and break bonds with a stretch :math:`s > s0` as in
+again and break bonds with a stretch :math:`s > s_0` as in
 :ref:`(8) <perimu>`, and finally loop over all particles and compute forces
 for the next step of :ref:`Algorithm 1 <algvelverlet>`. For reasons of
-computational efficiency, we will utilize the values of :math:`s_0` from
-the *previous* timestep when deciding to break a bond.
+computational efficiency, we instead store the per-particle minimum stretch
+:math:`s_{min}` from the *previous* timestep and, when deciding whether to
+break a bond, form its critical stretch :math:`s_0 = s_{00} - \alpha\,
+s_{min}` from that bond's own :math:`s_{00}` and :math:`\alpha`.  This keeps
+the criterion correct when :math:`s_{00}` and :math:`\alpha` differ between
+atom-type pairs (for example, a deliberately weakened interface).
+
+.. versionchanged:: 4Jul2026
+
+Earlier versions stored a single per-particle critical stretch :math:`s_0`
+(the maximum of :math:`s_{00} - \alpha s` over a particle's bonds), which
+reproduces :ref:`(9) <peris0>` only when :math:`s_{00}` and :math:`\alpha`
+are identical for all atom-type pairs.
 
 .. note::
 
@@ -860,15 +871,12 @@ Bugs
 The user is cautioned that this code is a beta release. If you are
 confident that you have found a bug in the peridynamic module, please
 report it in a `GitHub Issue <https://github.com/lammps/lammps/issues>`
-or send an email to the LAMMPS developers. First, check the `New
-features and bug fixes <https://www.lammps.org/bug.html>`_ section of
-the LAMMPS website site to see if the bug has already been reported or
-fixed. If not, the most useful thing you can do for us is to isolate the
-problem. Run it on the smallest number of atoms and fewest number of
-processors and with the simplest input script that reproduces the
-bug. In your message, describe the problem and any ideas you have as to
-what is causing it or where in the code the problem might be.  We'll
-request your input script and data files if necessary.
+or send an email to the LAMMPS developers.  Run it on the smallest
+number of atoms and fewest number of processors and with the simplest
+input script that reproduces the bug. In your message, describe the
+problem and any ideas you have as to what is causing it or where in the
+code the problem might be.  We'll request your input script and data
+files if necessary.
 
 Modifying and Extending the Peridynamic Module
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
