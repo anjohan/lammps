@@ -444,6 +444,7 @@ endif()
 # "hard" dependencies between packages resulting
 # in an error instead of skipping over files
 pkg_depends(ML-IAP ML-SNAP)
+pkg_depends(ML-PACE ML-SNAP)
 pkg_depends(LATBOLTZ MPI)
 pkg_depends(SCAFACOS MPI)
 pkg_depends(AMOEBA KSPACE)

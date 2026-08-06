@@ -268,6 +268,8 @@ The individual style names on the :doc:`Commands compute <Commands_compute>` pag
 * :doc:`orientorder/atom <compute_orientorder_atom>` - Steinhardt bond orientational order parameters Ql
 * :doc:`pace <compute_pace>` - atomic cluster expansion descriptors and related quantities
 * :doc:`pace/atom <compute_pace>` - per-atom atomic cluster expansion descriptors
+* :doc:`pace/grid <compute_pace>` - global array of atomic cluster expansion descriptors on a regular grid
+* :doc:`pace/grid/local <compute_pace>` - local array of atomic cluster expansion descriptors on a regular grid
 * :doc:`pair <compute_pair>` - values computed by a pair style
 * :doc:`pair/local <compute_pair_local>` - distance/energy/force of each pairwise interaction
 * :doc:`pe <compute_pe>` - potential energy

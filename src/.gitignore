@@ -132,6 +132,11 @@
 
 /compute_pace.cpp
 /compute_pace.h
+/compute_pace_grid.cpp
+/compute_pace_grid.h
+/compute_pace_grid_kokkos.cpp
+/compute_pace_grid_kokkos.h
+/compute_pace_impl.h
 /pair_pace.cpp
 /pair_pace.h
 /pair_pace_extrapolation.cpp

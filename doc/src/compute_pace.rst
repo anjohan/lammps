@@ -2,6 +2,10 @@
 .. index:: compute pace/kk
 .. index:: compute pace/atom
 .. index:: compute pace/atom/kk
+.. index:: compute pace/grid
+.. index:: compute pace/grid/kk
+.. index:: compute pace/grid/local
+.. index:: compute pace/grid/local/kk
 
 compute pace command
 ========================
@@ -13,6 +17,14 @@ compute pace/atom command
 
 Accelerator Variants: *pace/atom/kk*
 
+compute pace/grid command
+=========================
+
+compute pace/grid/local command
+===============================
+
+Accelerator Variants: *pace/grid/kk*, *pace/grid/local/kk*
+
 Syntax
 """"""
 
@@ -20,9 +32,11 @@ Syntax
 
    compute ID group-ID pace ace_potential_filename bikflag dgradflag keyword values ...
    compute ID group-ID pace/atom ace_potential_filename keyword values ...
+   compute ID group-ID pace/grid grid nx ny nz ace_potential_filename keyword values ...
+   compute ID group-ID pace/grid/local grid nx ny nz ace_potential_filename keyword values ...
 
 * ID, group-ID are documented in :doc:`compute <compute>` command
-* pace or pace/atom = style name of this compute command
+* pace or pace/atom or pace/grid or pace/grid/local = style name of this compute command
 * ace_potential_filename = file name (in the .yace or .ace format from :doc:`pace pair_style <pair_pace>`) including ACE hyper-parameters, bonds, and generalized coupling coefficients
 * bikflag = *0* or *1* (style *pace* only)
 
@@ -38,12 +52,15 @@ Syntax
        *0* = descriptor gradients are summed over atoms of each type
        *1* = descriptor gradients are listed separately for each atom pair
 
+* *grid* values = nx, ny, nz, number of grid points in the x, y, and z directions (positive integers, styles *pace/grid* and *pace/grid/local* only)
 * zero or more keyword/value pairs may be appended
-* keyword = *chunksize*
+* keyword = *chunksize* or *element*
 
   .. parsed-literal::
 
-       *chunksize* value = number of atoms in each pass (Kokkos accelerator variants only)
+       *chunksize* value = number of atoms, or grid points for styles *pace/grid* and *pace/grid/local*, processed in each pass (Kokkos accelerator variants only)
+       *element* value = name of an element in the *ace_potential_filename* file (styles *pace/grid* and *pace/grid/local* only)
+          default = first element listed in the *ace_potential_filename* file
 
 Examples
 """"""""
@@ -55,6 +72,9 @@ Examples
    compute pace all pace coupling_coefficients.yace 1 1 chunksize 512
    compute bik all pace/atom coupling_coefficients.yace
    compute bik all pace/atom coupling_coefficients.yace chunksize 8192
+   compute bgrid all pace/grid grid 20 20 20 coupling_coefficients.yace
+   compute bgrid all pace/grid grid 20 20 20 coupling_coefficients.yace element O
+   compute bgridloc all pace/grid/local grid 20 20 20 coupling_coefficients.yace chunksize 512
 
 Description
 """""""""""
@@ -168,6 +188,82 @@ two passes.  Larger chunks amortize kernel launch overhead at the cost of
 device memory; style *pace* uses a smaller default than *pace/atom* because
 its descriptor-gradient scratch arrays are much larger per atom.
 
+.. versionadded:: TBD
+
+The compute *pace/grid* and *pace/grid/local* commands calculate ACE
+descriptors :math:`B_{\boldsymbol{\nu}}` for a regular grid of points.
+These are calculated from the local density of nearby atoms *i'* around
+each grid point, as if there was a probe atom of a user-selected chemical
+element located at the grid point.  This is useful for characterizing
+fine-scale structure in a configuration of atoms, analogous to :doc:`compute
+sna/grid <compute_sna_atom>`.  Neighbor atoms not in the compute group do
+not contribute to the descriptors of a grid point.  Note that this is the
+opposite sense of the group filter used by style *pace/atom*: for
+*pace/atom* the group selects which atoms receive descriptors, while for
+*pace/grid* and *pace/grid/local* the group instead selects which atoms are
+allowed to contribute to the environment of every grid point; descriptors
+are always computed for every grid point, regardless of group membership.
+An atom located exactly at a grid point (separation :math:`r \approx 0`) is
+excluded from that point's environment.  Both computes can be hardware
+accelerated with Kokkos by using the *pace/grid/kk* and *pace/grid/local/kk*
+commands, respectively.
+
+Compute *pace/grid* calculates a global array containing ACE descriptors
+for a regular grid of points.  The grid is aligned with the current box
+dimensions, with the first point at the box origin, and forming a regular
+3d array with *nx*, *ny*, and *nz* points in the x, y, and z directions.
+For triclinic boxes, the array is congruent with the periodic lattice
+vectors a, b, and c.  The array contains one row for each of the
+:math:`nx \times ny \times nz` grid points, looping over the index for *ix*
+fastest, then *iy*, and *iz* slowest.  Each row of the array contains the
+*x*, *y*, and *z* coordinates of the grid point, followed by the ACE
+descriptors.  See section below on output for a detailed explanation of the
+data layout in the global array.
+
+Compute *pace/grid/local* calculates ACE descriptors of a regular grid of
+points similarly to compute *pace/grid* described above.  However, because
+the array is local, it contains only rows for grid points that are local to
+the processor subdomain.  The global grid of :math:`nx \times ny \times nz`
+points is still laid out in space the same as for *pace/grid*, but grid
+points are strictly partitioned, so that every grid point appears in one
+and only one local array.  The array contains one row for each of the local
+grid points, looping over the global index *ix* fastest, then *iy*, and
+*iz* slowest.  Each row of the array contains the global indexes *ix*,
+*iy*, and *iz* first, followed by the *x*, *y*, and *z* coordinates of the
+grid point, followed by the ACE descriptors.  See section below on output
+for a detailed explanation of the data layout in the local array.
+
+.. note::
+
+   Compute *pace/grid* allocates the entire
+   :math:`nx \times ny \times nz \times (3 + K)` global array (and a second
+   copy used during the reduction) on **every** MPI rank, and sums the array
+   across all ranks with a global reduction on every invocation.  Its memory
+   and communication cost therefore grow with the total grid size no matter
+   how many processors are used.  For large grids -- for example the
+   millions of grid points typical of grid-based machine-learning workflows
+   -- use compute *pace/grid/local* instead: it stores only the rows for the
+   grid points owned by each processor and performs no global reduction.
+
+The *grid* keyword defines *nx*, *ny*, and *nz*, the number of grid points
+spanning the box in each of the x, y, and z directions.
+
+The keyword *element* selects the chemical element, from those listed in
+the *ace_potential_filename* coupling-coefficient file, used as the central
+(probe) species for every grid point.  If unspecified, the first element
+listed in the file is used.  This selection applies uniformly to the entire
+grid; a single invocation of *pace/grid* or *pace/grid/local* cannot mix
+elements across grid points.
+
+The keyword *chunksize* is only applicable when using the Kokkos accelerator
+variants of these styles (*pace/grid/kk*, *pace/grid/local/kk*); the plain
+styles accept and ignore it, so the same input script runs with and without
+the :doc:`-suffix command-line switch <Run_options>`.  It controls the
+number of grid points processed in each pass of the device descriptor
+calculation, bounding the size of the per-chunk scratch arrays, in the same
+way that *chunksize* bounds the number of atoms per pass for styles *pace*
+and *pace/atom*.
+
 .. note::
 
     It is noted here that in contrast to :doc:`pace pair_style <pair_pace>`,
@@ -269,11 +365,30 @@ descriptors :math:`B_{i,\boldsymbol{\nu}}` of one atom, in the same
 descriptor order as the columns of one type block of the *pace* global
 array.  Rows of atoms outside the compute group are zero.
 
-The global array values of *pace* can be accessed by any command that uses
-global values from a compute as input, and the per-atom array of *pace/atom*
-by any command that uses per-atom values from a compute as input.  See the
-:doc:`Howto output <Howto_output>` doc page for an overview of LAMMPS output
-options.
+Compute *pace/grid* evaluates a global array.  The array contains one row
+for each of the :math:`nx \times ny \times nz` grid points, looping over
+the index for *ix* fastest, then *iy*, and *iz* slowest.  Each row of the
+array contains the *x*, *y*, and *z* coordinates of the grid point,
+followed by the *nvalues* ACE descriptors, in the same descriptor order as
+one type block of the *pace* global array.  For an orthogonal box of edge
+lengths :math:`L_x`, :math:`L_y`, :math:`L_z`, grid point (*ix*, *iy*,
+*iz*) is located at :math:`(ix\,L_x/nx,\ iy\,L_y/ny,\ iz\,L_z/nz)`; for
+triclinic boxes the grid is congruent with the periodic lattice vectors
+instead.
+
+Compute *pace/grid/local* evaluates a local array.  The array contains one
+row for each of the local grid points, looping over the global index *ix*
+fastest, then *iy*, and *iz* slowest.  Each row of the array contains the
+global indexes *ix*, *iy*, and *iz* first, followed by the *x*, *y*, and
+*z* coordinates of the grid point, followed by the *nvalues* ACE
+descriptors.
+
+The global array values of *pace* and *pace/grid* can be accessed by any
+command that uses global values from a compute as input, the local array
+of *pace/grid/local* by any command that uses local values from a compute
+as input, and the per-atom array of *pace/atom* by any command that uses
+per-atom values from a compute as input.  See the :doc:`Howto output
+<Howto_output>` doc page for an overview of LAMMPS output options.
 
 ----------
 
@@ -298,18 +413,55 @@ forms of standard *.yace* potential files, and do not support a ZBL core
 repulsion inner cutoff.  Unsupported potential files produce an error, in
 which case the plain CPU styles can be used instead.
 
+Styles *pace/grid* and *pace/grid/local* build on the grid infrastructure
+of the ML-SNAP package (shared with :doc:`compute sna/grid
+<compute_sna_atom>`), so the ML-SNAP package must also be installed;
+enabling the ML-PACE package with CMake automatically enables ML-SNAP.
+
+A pair style with a force cutoff at least as large as the cutoff of the
+*ace_potential_filename* potential must be defined, exactly as for style
+*pace* above; this guarantees that the ghost atoms needed to fill each grid
+point's environment are available.
+
+For orthogonal simulation boxes, the lower corner of the box must be
+located at the origin (boxlo = 0), because grid point positions are
+measured from the origin and the restriction is not otherwise enforced.
+Triclinic boxes have no such restriction, because grid point positions
+are computed from fractional (lamda) coordinates.
+
+For all of these compute styles, LAMMPS atom types are mapped to the
+elements of the *ace_potential_filename* file by order: atom type 1
+corresponds to the first element listed in the file, type 2 to the second,
+and so on.  The number of atom types may not exceed the number of elements
+in the file.
+
+A grid point of styles *pace/grid* and *pace/grid/local* may coincide
+exactly with an atom position: any atom closer than :math:`10^{-10}`
+distance units to a grid point is excluded from that grid point's
+environment, so the computed descriptors are those of the remaining
+neighborhood.  However, a grid point at a very small but nonzero distance
+from an atom -- closer than roughly the innermost bin of the tabulated
+radial functions, on the order of :math:`10^{-3}` distance units -- stops
+the run with an "Encountered very small distance" error from the ACE
+evaluator.  Dense grids in dense systems can occasionally place a grid
+point this close to a nucleus; choosing slightly different grid dimensions
+*nx*, *ny*, *nz* moves the grid points and avoids the error.
+
 Related commands
 """"""""""""""""
 
 :doc:`pair_style pace <pair_pace>`
 :doc:`pair_style snap <pair_snap>`
 :doc:`compute snap <compute_sna_atom>`
+:doc:`compute sna/grid <compute_sna_atom>`
 
 Default
 """""""
 
 The keyword default is *chunksize* = 4096 for *pace/atom/kk* and 256 for
-*pace/kk*.
+*pace/kk*, and 4096 for *pace/grid/kk* and *pace/grid/local/kk*.  The
+keyword default for *element* is the first element listed in the
+*ace_potential_filename* file.
 
 ----------
 

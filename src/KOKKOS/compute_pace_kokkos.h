@@ -49,6 +49,12 @@ namespace LAMMPS_NS {
 // GPU (host_flag=false): TeamPolicy over (atom,neighbour) for Radial/Ai (fills
 //   CUDA warps), flat RangePolicy(chunk_size*idx_ms_combs_max) for Projections;
 //   both use Kokkos::atomic_add. Dispatch selects the right policy at runtime.
+//
+// compute_pace_grid_kokkos.{h,cpp} (compute pace/grid/kk, pace/grid/local/kk)
+// duplicates-and-adapts the descriptor-only slice of this pipeline (init-time
+// basis upload + evaluate_splines/ai_one_neighbor/ai_accumulate/project_one)
+// for a per-grid-point, always-RangePolicy, no-atomics evaluation loop; the
+// cross-reference "keep in sync" comments live at each duplicated block below.
 
 template<class DeviceType, int PERATOM>
 class ComputePACEKokkos : public ComputePACE<PERATOM> {

@@ -1997,12 +1997,19 @@ Aidan Thompson^3, Gabor Csanyi^2, Christoph Ortner^4, Ralf Drautz^1.
 
 This package has :ref:`specific installation instructions <ml-pace>` on the
 :doc:`Build extras <Build_extras>` page.  This package may also be compiled
-as a plugin to avoid licensing conflicts when distributing binaries.
+as a plugin to avoid licensing conflicts when distributing binaries.  To use
+the *pace/grid* and *pace/grid/local* compute styles, also the
+:ref:`ML-SNAP <PKG-ML-SNAP>` package needs to be installed; enabling ML-PACE
+with CMake automatically enables ML-SNAP.
 
 **Supporting info:**
 
 * ``src/ML-PACE``: filenames -> commands
 * :doc:`pair_style pace <pair_pace>`
+* :doc:`compute pace <compute_pace>`
+* :doc:`compute pace/atom <compute_pace>`
+* :doc:`compute pace/grid <compute_pace>`
+* :doc:`compute pace/grid/local <compute_pace>`
 * ``examples/PACKAGES/pace``
 
 ----------

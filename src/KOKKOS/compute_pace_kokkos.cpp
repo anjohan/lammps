@@ -1018,6 +1018,7 @@ void ComputePACEKokkos<DeviceType, PERATOM>::operator()(TagComputePACEAiFused, c
    and the thread-local-spline caller (ai_one_neighbor_fused) share this one
    copy of the recurrence.
    UseAtomic=false (CPU): direct +=; UseAtomic=true (GPU): atomic_add.
+   duplicated (UseAtomic=false only) at compute_pace_grid_kokkos.cpp -- keep in sync
 ------------------------------------------------------------------------- */
 
 template<class DeviceType, int PERATOM>
@@ -1127,6 +1128,7 @@ void ComputePACEKokkos<DeviceType, PERATOM>::ai_accumulate(int ii, int jj, int m
 /* ----------------------------------------------------------------------
    ai_one_neighbor: A accumulation reading fr/gr from the global spline
    views (Radial must have run first).
+   duplicated (UseAtomic=false only) at compute_pace_grid_kokkos.cpp -- keep in sync
 ------------------------------------------------------------------------- */
 
 template<class DeviceType, int PERATOM>
@@ -1289,6 +1291,8 @@ void ComputePACEKokkos<DeviceType, PERATOM>::operator()(TagComputePACEProjection
      zero. d_pace_atom is zeroed once before the chunk loop; chunks are disjoint per
      atom so no cross-chunk races; within a chunk different ms-combs for the same
      function share a slot → atomic_add needed.
+   duplicated-and-trimmed (no PERATOM branch, always writes d_projections) at
+   compute_pace_grid_kokkos.cpp -- keep in sync
 ------------------------------------------------------------------------- */
 
 template<class DeviceType, int PERATOM>
@@ -2235,7 +2239,12 @@ void ComputePACEKokkos<DeviceType, PERATOM>::grow(int natom, int maxneigh)
   }
 }
 
-/* ---------------------------------------------------------------------- */
+/* ----------------------------------------------------------------------
+   init-time device basis upload (copy_pertype/copy_splines/copy_tilde/
+   pre_compute_harmonics/SplineInterpolatorKokkos below) is duplicated (and,
+   for copy_tilde, trimmed of the gradient-only tables d_ls/d_tbs_r1/d_tbs)
+   at compute_pace_grid_kokkos.cpp -- keep in sync.
+------------------------------------------------------------------------- */
 
 template<class DeviceType, int PERATOM>
 void ComputePACEKokkos<DeviceType, PERATOM>::copy_pertype()
@@ -2490,7 +2499,12 @@ void ComputePACEKokkos<DeviceType, PERATOM>::pre_compute_harmonics(int lmax)
   Kokkos::deep_copy(dl, h_dl);
 }
 
-/* ---------------------------------------------------------------------- */
+/* ----------------------------------------------------------------------
+   evaluate_splines / SplineInterpolatorKokkos (calcSplines vals-only
+   overloads + operator=) duplicated-and-trimmed (always the no-derivative
+   path; no calcSplines-with-derivatives or calcSplines_local overloads) at
+   compute_pace_grid_kokkos.cpp -- keep in sync.
+------------------------------------------------------------------------- */
 
 template<class DeviceType, int PERATOM>
 // NOLINTNEXTLINE

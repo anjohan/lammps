@@ -92,6 +92,8 @@ OPT.
    * :doc:`orientorder/atom (ko) <compute_orientorder_atom>`
    * :doc:`pace (k) <compute_pace>`
    * :doc:`pace/atom (k) <compute_pace>`
+   * :doc:`pace/grid (k) <compute_pace>`
+   * :doc:`pace/grid/local (k) <compute_pace>`
    * :doc:`pair <compute_pair>`
    * :doc:`pair/local <compute_pair_local>`
    * :doc:`pe <compute_pe>`
